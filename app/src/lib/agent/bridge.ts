@@ -69,7 +69,10 @@ export const runShopifyActionBridge = serverOnly(async (params: {
   actionType: string;
   payload: Record<string, unknown>;
   userId: string;
-}) => {
+}): Promise<
+  | { ok: true; message?: string; data?: Record<string, {}> }
+  | { ok: false; reason: string; details?: Record<string, {}> }
+> => {
   const agent = await loadMastraAgent();
   // Resolve Shopify auth for the user
   const row = await db.query.token.findFirst({
@@ -91,7 +94,10 @@ export const runShopifyActionBridge = serverOnly(async (params: {
       actionType: params.actionType,
       payload: params.payload,
       auth: { shop, accessToken },
-    } as any);
+    } as any) as Promise<
+      | { ok: true; message?: string; data?: Record<string, {}> }
+      | { ok: false; reason: string; details?: Record<string, {}> }
+    >;
   }
   // Fallback: just echo without executing
   return { ok: false, reason: "Mastra agent not configured" } as const;

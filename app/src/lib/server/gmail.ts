@@ -99,7 +99,6 @@ export const proposeActions = createServerFn()
     if (!context?.user) {
       throw new Error("Unauthorized");
     }
-    // TODO: Call Mastra agent with email content to propose Shopify actions
     const proposals = await proposeFromEmailBridge({ content: data.content, userId: context.user.id });
     return { proposals, userId: context.user.id } as const;
   });
@@ -118,8 +117,67 @@ export const sendReply = createServerFn()
     if (!context?.user) {
       throw new Error("Unauthorized");
     }
-    // TODO: Use Gmail API to send a reply in the thread
-    return { ok: true, userId: context.user.id } as const;
+    // Load Gmail OAuth token
+    const tokenRow = await db.query.token.findFirst({
+      where: (t, ops) => ops.and(ops.eq(t.userId, context.user.id), ops.or(ops.eq(t.provider, "google"), ops.eq(t.provider, "gmail"))),
+    });
+    if (!tokenRow) {
+      return { ok: false, reason: "No Gmail token" } as const;
+    }
+    let tokenJson: any = {};
+    try {
+      tokenJson = JSON.parse(decrypt(tokenRow.encryptedToken) || "{}");
+    } catch {}
+    let accessToken: string = tokenJson.access_token || tokenJson.accessToken || "";
+    if (!accessToken) {
+      return { ok: false, reason: "Missing Gmail access token" } as const;
+    }
+
+    // Compose MIME message (text/plain)
+    const headers = [
+      `To: ${data.to}`,
+      `Subject: ${data.subject}`,
+      "MIME-Version: 1.0",
+      'Content-Type: text/plain; charset="UTF-8"',
+    ].join("\r\n");
+    const mime = `${headers}\r\n\r\n${data.body}\r\n`;
+    const raw = encodeUtf8ToBase64Url(mime);
+
+    let authHeader = { Authorization: `Bearer ${accessToken}` } as const;
+    const doSend = async () =>
+      await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeader },
+        body: JSON.stringify({ raw, threadId: data.threadId }),
+      });
+
+    let res = await doSend();
+    // Attempt refresh on 401 once
+    if (res.status === 401) {
+      const refreshed = await doRefresh(tokenRow.id, tokenJson);
+      if (refreshed?.accessToken) {
+        accessToken = refreshed.accessToken;
+        tokenJson = refreshed.tokenJson;
+        authHeader = { Authorization: `Bearer ${accessToken}` } as const;
+        res = await doSend();
+      }
+    }
+    // Light backoff for 429/5xx
+    let attempt = 0;
+    while ((res.status === 429 || res.status >= 500) && attempt < 2) {
+      const delay = 400 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+      await new Promise((r) => setTimeout(r, delay));
+      res = await doSend();
+      attempt++;
+    }
+
+    if (!res.ok) {
+      const errTxt = await res.text();
+      console.error("[gmail] sendReply failed", { userId: context.user.id, status: res.status, err: errTxt });
+      return { ok: false, reason: `Gmail send failed: ${errTxt}` } as const;
+    }
+    const json = (await res.json()) as any;
+    return { ok: true, id: json.id as string, threadId: json.threadId as string } as const;
   });
 
 export const poll = createServerFn()
@@ -448,4 +506,9 @@ function htmlToText(html: string): string {
   } catch {
     return html;
   }
+}
+
+function encodeUtf8ToBase64Url(text: string): string {
+  const b64 = Buffer.from(text, "utf8").toString("base64");
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }

@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tanstarter-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tanstarter
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: tanstarter-app
+    ports:
+      - "3000:3000"
+    environment:
+      # App base URL for Better Auth and redirects
+      - VITE_BASE_URL=http://localhost:3000
+      # Database points to the db service name inside the docker network
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/tanstarter
+      # Better Auth secret (fill in .env for local non-docker)
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-changeme}
+      # Encryption key for token storage (32-byte hex)
+      - MASTER_KEY=${MASTER_KEY:-}
+      # OAuth placeholders (also sourced from bind-mounted .env if present)
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_SCOPES=${GOOGLE_SCOPES:-"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send"}
+      - GMAIL_LABEL_QUERY=${GMAIL_LABEL_QUERY:-"label:customer-inquiries newer_than:7d"}
+      - SHOPIFY_API_KEY=${SHOPIFY_API_KEY:-}
+      - SHOPIFY_API_SECRET=${SHOPIFY_API_SECRET:-}
+      - SHOPIFY_SCOPES=${SHOPIFY_SCOPES:-}
+      - SHOPIFY_REDIRECT=${SHOPIFY_REDIRECT:-http://localhost:3000/api/shopify/callback}
+      - SHOPIFY_SHOP=${SHOPIFY_SHOP:-r901.myshopify.com}
+    volumes:
+      - ./app:/app
+      - app_node_modules:/app/node_modules
+    depends_on:
+      - db
+
+volumes:
+  db_data:
+  app_node_modules:

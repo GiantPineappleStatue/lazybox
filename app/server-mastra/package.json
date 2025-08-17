@@ -1,0 +1,11 @@
+{
+  "name": "server-mastra",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Server-only Mastra agent subpackage (isolated deps: zod v3)",
+  "dependencies": {
+    "@mastra/core": "latest",
+    "zod": "^3.23.8"
+  }
+}

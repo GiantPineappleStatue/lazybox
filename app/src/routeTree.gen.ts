@@ -12,6 +12,7 @@ import { createServerRootRoute } from "@tanstack/react-start/server";
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as SettingsRouteImport } from "./routes/settings";
+import { Route as ProposalsRouteImport } from "./routes/proposals";
 import { Route as DashboardRouteRouteImport } from "./routes/dashboard/route";
 import { Route as authRouteRouteImport } from "./routes/(auth)/route";
 import { Route as IndexRouteImport } from "./routes/index";
@@ -31,6 +32,11 @@ const rootServerRouteImport = createServerRootRoute();
 const SettingsRoute = SettingsRouteImport.update({
   id: "/settings",
   path: "/settings",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ProposalsRoute = ProposalsRouteImport.update({
+  id: "/proposals",
+  path: "/proposals",
   getParentRoute: () => rootRouteImport,
 } as any);
 const DashboardRouteRoute = DashboardRouteRouteImport.update({
@@ -102,6 +108,7 @@ const ApiAuthSplatServerRoute = ApiAuthSplatServerRouteImport.update({
 export interface FileRoutesByFullPath {
   "/": typeof authRouteRouteWithChildren;
   "/dashboard": typeof DashboardRouteRouteWithChildren;
+  "/proposals": typeof ProposalsRoute;
   "/settings": typeof SettingsRoute;
   "/login": typeof authLoginRoute;
   "/signup": typeof authSignupRoute;
@@ -109,6 +116,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   "/": typeof authRouteRouteWithChildren;
+  "/proposals": typeof ProposalsRoute;
   "/settings": typeof SettingsRoute;
   "/login": typeof authLoginRoute;
   "/signup": typeof authSignupRoute;
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   "/": typeof IndexRoute;
   "/(auth)": typeof authRouteRouteWithChildren;
   "/dashboard": typeof DashboardRouteRouteWithChildren;
+  "/proposals": typeof ProposalsRoute;
   "/settings": typeof SettingsRoute;
   "/(auth)/login": typeof authLoginRoute;
   "/(auth)/signup": typeof authSignupRoute;
@@ -129,17 +138,19 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/dashboard"
+    | "/proposals"
     | "/settings"
     | "/login"
     | "/signup"
     | "/dashboard/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/settings" | "/login" | "/signup" | "/dashboard";
+  to: "/" | "/proposals" | "/settings" | "/login" | "/signup" | "/dashboard";
   id:
     | "__root__"
     | "/"
     | "/(auth)"
     | "/dashboard"
+    | "/proposals"
     | "/settings"
     | "/(auth)/login"
     | "/(auth)/signup"
@@ -150,6 +161,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   authRouteRoute: typeof authRouteRouteWithChildren;
   DashboardRouteRoute: typeof DashboardRouteRouteWithChildren;
+  ProposalsRoute: typeof ProposalsRoute;
   SettingsRoute: typeof SettingsRoute;
 }
 export interface FileServerRoutesByFullPath {
@@ -227,6 +239,13 @@ declare module "@tanstack/react-router" {
       path: "/settings";
       fullPath: "/settings";
       preLoaderRoute: typeof SettingsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/proposals": {
+      id: "/proposals";
+      path: "/proposals";
+      fullPath: "/proposals";
+      preLoaderRoute: typeof ProposalsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/dashboard": {
@@ -357,6 +376,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   authRouteRoute: authRouteRouteWithChildren,
   DashboardRouteRoute: DashboardRouteRouteWithChildren,
+  ProposalsRoute: ProposalsRoute,
   SettingsRoute: SettingsRoute,
 };
 export const routeTree = rootRouteImport

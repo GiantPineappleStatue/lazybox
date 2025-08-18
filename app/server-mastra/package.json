@@ -4,11 +4,19 @@
   "type": "module",
   "version": "0.0.0",
   "description": "Server-only Mastra agent subpackage (isolated deps: zod v3)",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
   "dependencies": {
     "@mastra/core": "latest",
     "@ai-sdk/openai": "^1.0.0",
     "@mastra/memory": "latest",
     "@mastra/libsql": "latest",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
   }
 }

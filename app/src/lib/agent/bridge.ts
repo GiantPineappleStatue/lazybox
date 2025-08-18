@@ -1,8 +1,10 @@
 import { serverOnly } from "@tanstack/react-start";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { db } from "~/lib/db";
 import { decrypt } from "~/lib/crypto/secureStore";
 import { env } from "~/env/server";
+import { proposal as proposalTable, action as actionTable } from "~/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export type ProposedAction = {
   id: string;
@@ -112,3 +114,92 @@ export const runShopifyActionBridge = serverOnly(async (params: {
   // Fallback: just echo without executing
   return { ok: false, reason: "Mastra agent not configured" } as const;
 });
+
+export const orchestrateEmailBridge = serverOnly(
+  async (params: { content: string; userId: string; execute?: boolean; emailId?: string }) => {
+    const [agent, orchestrator] = await Promise.all([
+      loadMastraAgent(),
+      // Dynamic import to avoid bundling server-only deps into the app
+      import("../../../server-mastra/src/orchestrator"),
+    ]);
+
+    // Resolve per-user LLM settings
+    const settings = await db.query.settings.findFirst({ where: (t, { eq }) => eq(t.userId, params.userId) });
+    const llmProvider = settings?.llmProvider || "";
+    const llmModel = settings?.llmModel || "";
+    const llmBaseUrl = settings?.llmBaseUrl || "";
+    const llmApiKey = settings?.encryptedLlmApiKey ? decrypt(settings.encryptedLlmApiKey) : "";
+
+    // Optional Shopify auth if execute=true
+    let shopifyAuth: { shop: string; accessToken: string } | undefined;
+    if (params.execute) {
+      const row = await db.query.token.findFirst({ where: (t, { and, eq }) => and(eq(t.userId, params.userId), eq(t.provider, "shopify")) });
+      const tokenJson = row ? (JSON.parse(decrypt(row.encryptedToken) || "{}") as { access_token?: string }) : undefined;
+      const accessToken = tokenJson?.access_token;
+      const s = await db.query.settings.findFirst({ where: (t, { eq }) => eq(t.userId, params.userId) });
+      const shop = s?.shopDomain || (row as any)?.meta?.shop || env.SHOPIFY_SHOP;
+      if (accessToken && shop) {
+        shopifyAuth = { shop, accessToken };
+      }
+    }
+
+    if ((orchestrator as any)?.orchestrateEmail) {
+      // DB-backed reporter sink
+      const emailId = params.emailId;
+      const reporter: any = {
+        onProposed: async (proposed: ProposedAction[]) => {
+          for (const p of proposed) {
+            const payloadHash = createHash("sha256").update(JSON.stringify(p.payload || {})).digest("hex");
+            await db
+              .insert(proposalTable)
+              .values({
+                id: p.id,
+                emailId: emailId || "",
+                userId: params.userId,
+                actionType: p.actionType,
+                payloadJson: p.payload || {},
+                payloadHash,
+                modelMeta: { provider: llmProvider, model: llmModel, baseUrl: llmBaseUrl },
+              })
+              .onConflictDoNothing({ target: [proposalTable.emailId, proposalTable.actionType, proposalTable.payloadHash] });
+          }
+        },
+        onExecuted: async (executed: Array<{ id: string; actionType: string; ok: boolean; message?: string; reason?: string; data?: Record<string, unknown> }>) => {
+          for (const rec of executed) {
+            // action id == proposal id for traceability
+            await db.insert(actionTable).values({
+              id: rec.id,
+              proposalId: rec.id,
+              status: rec.ok ? "executed" : "failed",
+              resultJson: rec.ok ? (rec.data ?? null) : null,
+              error: rec.ok ? null : rec.reason ?? rec.message ?? "",
+              executedAt: new Date(),
+            }).onConflictDoNothing();
+            // update proposal status
+            await db.update(proposalTable).set({ status: rec.ok ? "executed" : "failed", updatedAt: new Date() }).where(eq(proposalTable.id, rec.id));
+          }
+        },
+      };
+
+      return (orchestrator as any).orchestrateEmail({
+        content: params.content,
+        llm: { provider: llmProvider, model: llmModel, baseUrl: llmBaseUrl, apiKey: llmApiKey },
+        execute: Boolean(params.execute),
+        shopifyAuth,
+        reporter,
+      });
+    }
+
+    // Fallback: if orchestrator missing, directly call proposeFromEmail via agent
+    if ((agent as any)?.proposeFromEmail) {
+      const resourceId = params.userId;
+      const threadId = `proposeFromEmail`;
+      const proposed = (await (agent as any).proposeFromEmail(params.content, {
+        llm: { provider: llmProvider, model: llmModel, baseUrl: llmBaseUrl, apiKey: llmApiKey, resourceId, threadId },
+      })) as ProposedAction[];
+      return { proposed, executed: params.execute ? [] : undefined };
+    }
+
+    return { proposed: [], executed: params.execute ? [] : undefined };
+  },
+);

@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, jsonb, boolean, integer, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, jsonb, boolean, integer, uniqueIndex, index } from "drizzle-orm/pg-core";
 
 export const token = pgTable("token", {
   id: text("id").primaryKey(),
@@ -53,6 +53,8 @@ export const proposal = pgTable(
       t.actionType,
       t.payloadHash,
     ),
+    proposalUserStatusCreatedIdx: index("proposal_user_status_created_idx").on(t.userId, t.status, t.createdAt),
+    proposalUserCreatedIdx: index("proposal_user_created_idx").on(t.userId, t.createdAt),
   }),
 );
 
@@ -86,3 +88,21 @@ export const settings = pgTable("settings", {
   createdAt: timestamp("created_at").$defaultFn(() => new Date()).notNull(),
   updatedAt: timestamp("updated_at").$defaultFn(() => new Date()).notNull(),
 });
+
+// Observability: per-user poll history
+export const pollHistory = pgTable(
+  "poll_history",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    ranAt: timestamp("ran_at").$defaultFn(() => new Date()).notNull(),
+    fetched: integer("fetched").default(0),
+    proposed: integer("proposed").default(0),
+    error: text("error"),
+    gmailHistoryId: text("gmail_history_id"),
+    createdAt: timestamp("created_at").$defaultFn(() => new Date()).notNull(),
+  },
+  (t) => ({
+    pollHistoryUserRanIdx: index("poll_history_user_ran_idx").on(t.userId, t.ranAt),
+  }),
+);

@@ -1,8 +1,8 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute, redirect, Link } from "@tanstack/react-router";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { poll } from "~/lib/server/gmail";
+import { poll, orchestrate } from "~/lib/server/gmail";
 
 export const Route = createFileRoute("/settings")({
   beforeLoad: async ({ context }) => {
@@ -38,6 +38,27 @@ function SettingsPage() {
       const res = await fetch("/api/settings", { method: "GET" });
       if (!res.ok) throw new Error("Failed to load settings");
       return (await res.json()) as SettingsPayload;
+    },
+  });
+
+  // Orchestrate test form
+  const [orch, setOrch] = React.useState({ emailId: "test-email", content: "", execute: false });
+  const orchestrateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await orchestrate({ data: { emailId: orch.emailId, content: orch.content, execute: orch.execute } });
+      return res as unknown as { ok: boolean; proposed: Array<{ id: string; actionType: string }>; executed: Array<{ id: string; actionType: string; ok: boolean; reason?: string }>; };
+    },
+    onSuccess: (res) => {
+      if (!res.ok) {
+        toast.error("Orchestrate failed");
+        return;
+      }
+      const p = res.proposed?.length ?? 0;
+      const e = res.executed?.length ?? 0;
+      toast.success(`Orchestrate complete: ${p} proposed${orch.execute ? `, ${e} executed` : ""}`);
+    },
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Orchestrate failed");
     },
   });
 
@@ -123,6 +144,11 @@ function SettingsPage() {
   return (
     <div className="max-w-2xl p-6 space-y-6">
       <h1 className="text-2xl font-semibold">Settings</h1>
+      <div className="flex justify-end">
+        <Link to="/proposals" className="px-3 py-1.5 bg-gray-900 text-white rounded">
+          Open Proposals
+        </Link>
+      </div>
       <form className="space-y-5" onSubmit={onSubmit}>
         <Field label="Shopify Shop Domain" hint="e.g. r901.myshopify.com">
           <input
@@ -264,6 +290,49 @@ function SettingsPage() {
             {pollMutation.isPending ? "Polling…" : "Run Poll Now"}
           </button>
         </div>
+
+        {import.meta.env.DEV && (
+          <div className="rounded border p-3 space-y-3">
+            <div className="font-medium">Orchestrate Test</div>
+            <Field label="Email ID" hint="Identifier to associate proposals with">
+              <input
+                className="w-full border rounded p-2"
+                type="text"
+                value={orch.emailId}
+                onChange={(e) => setOrch((p) => ({ ...p, emailId: e.target.value }))}
+                placeholder="email-123"
+              />
+            </Field>
+            <Field label="Email Content" hint="Paste the email body to extract actions">
+              <textarea
+                className="w-full border rounded p-2 min-h-40"
+                value={orch.content}
+                onChange={(e) => setOrch((p) => ({ ...p, content: e.target.value }))}
+                placeholder="Customer email content..."
+              />
+            </Field>
+            <div className="flex items-center gap-2">
+              <input
+                id="orch-execute"
+                className="h-4 w-4"
+                type="checkbox"
+                checked={orch.execute}
+                onChange={(e) => setOrch((p) => ({ ...p, execute: e.target.checked }))}
+              />
+              <label htmlFor="orch-execute" className="text-sm">Execute actions immediately (requires Shopify auth)</label>
+            </div>
+            <div>
+              <button
+                type="button"
+                className="px-4 py-2 bg-emerald-600 text-white rounded disabled:opacity-50"
+                onClick={() => orchestrateMutation.mutate()}
+                disabled={orchestrateMutation.isPending || !orch.content.trim()}
+              >
+                {orchestrateMutation.isPending ? (orch.execute ? "Executing…" : "Proposing…") : (orch.execute ? "Propose + Execute" : "Propose Only")}
+              </button>
+            </div>
+          </div>
+        )}
       </form>
     </div>
   );

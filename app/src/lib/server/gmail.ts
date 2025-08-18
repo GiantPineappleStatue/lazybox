@@ -2,14 +2,20 @@ import { createServerFn } from "@tanstack/react-start";
 import * as z from "zod";
 import { authMiddleware } from "~/lib/auth/middleware/auth-guard";
 import { env } from "~/env/server";
-import { proposeFromEmailBridge } from "~/lib/agent/bridge";
+import { proposeFromEmailBridge, orchestrateEmailBridge, type ProposedAction } from "~/lib/agent/bridge";
 import { db } from "~/lib/db";
 import { email as emailTable, proposal as proposalTable, token as tokenTable, settings as settingsTable } from "~/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { encrypt, decrypt } from "~/lib/crypto/secureStore";
 import { randomUUID, createHash } from "node:crypto";
 
 const isDev = process.env.NODE_ENV !== "production";
+
+// In-memory per-process lock map to prevent concurrent polls per user
+const activePolls = new Map<string, Promise<
+  | { ok: true; disabled: boolean; fetched: number; proposed: number; labelQuery: string }
+  | { ok: false; reason: string; fetched: number; proposed: number; labelQuery?: string }
+>>();
 
 export const loadEmails = createServerFn()
   .middleware([authMiddleware])
@@ -105,6 +111,27 @@ export const proposeActions = createServerFn()
     return { proposals, userId: context.user.id } as const;
   });
 
+export const orchestrate = createServerFn()
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      emailId: z.string(),
+      content: z.string(),
+      execute: z.boolean().optional(),
+    }),
+  )
+  .handler(async ({ data, context }) => {
+    if (!context?.user) {
+      throw new Error("Unauthorized");
+    }
+    const userId = context.user.id;
+    const result = (await orchestrateEmailBridge({ content: data.content, userId, execute: Boolean(data.execute), emailId: data.emailId })) as {
+      proposed: ProposedAction[];
+      executed?: Array<{ id: string; actionType: string; ok: boolean; message?: string; reason?: string; data?: Record<string, {}> }>;
+    };
+    return { ok: true, proposed: result.proposed, executed: result.executed ?? [] } as const;
+  });
+
 export const sendReply = createServerFn()
   .middleware([authMiddleware])
   .validator(
@@ -193,8 +220,36 @@ export const poll = createServerFn()
     if (!context?.user) {
       throw new Error("Unauthorized");
     }
-    const result = await pollForUser(context.user.id, data.maxResults);
-    return result;
+    const userId = context.user.id;
+
+    // Throttle: enforce a minimal interval between polls based on lastPollAt
+    try {
+      const settings = await db.query.settings.findFirst({ where: (t, { eq }) => eq(t.userId, userId) });
+      const last = settings?.lastPollAt ? new Date(settings.lastPollAt).getTime() : 0;
+      const now = Date.now();
+      const minIntervalMs = 5000; // 5 seconds server-side throttle
+      if (last && now - last < minIntervalMs) {
+        const waitMs = minIntervalMs - (now - last);
+        if (isDev) console.info("[poll] throttled", { userId, waitMs });
+        return { ok: false, reason: `Please wait ${Math.ceil(waitMs / 1000)}s before polling again.`, fetched: 0, proposed: 0 } as const;
+      }
+    } catch {}
+
+    // Concurrency guard: if a poll is already running for this user, do not start another
+    const existing = activePolls.get(userId);
+    if (existing) {
+      if (isDev) console.info("[poll] already-running", { userId });
+      return { ok: false, reason: "A poll is already running for this user.", fetched: 0, proposed: 0 } as const;
+    }
+
+    const inFlight = (async () => await pollForUser(userId, data.maxResults))();
+    activePolls.set(userId, inFlight);
+    try {
+      const result = await inFlight;
+      return result;
+    } finally {
+      activePolls.delete(userId);
+    }
   });
 
 export async function pollForUser(userId: string, maxResults: number) {

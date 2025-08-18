@@ -9,6 +9,8 @@ import { eq } from "drizzle-orm";
 import { encrypt, decrypt } from "~/lib/crypto/secureStore";
 import { randomUUID, createHash } from "node:crypto";
 
+const isDev = process.env.NODE_ENV !== "production";
+
 export const loadEmails = createServerFn()
   .middleware([authMiddleware])
   .validator(
@@ -173,7 +175,7 @@ export const sendReply = createServerFn()
 
     if (!res.ok) {
       const errTxt = await res.text();
-      console.error("[gmail] sendReply failed", { userId: context.user.id, status: res.status, err: errTxt });
+      if (isDev) console.error("[gmail] sendReply failed", { userId: context.user.id, status: res.status, err: errTxt });
       return { ok: false, reason: `Gmail send failed: ${errTxt}` } as const;
     }
     const json = (await res.json()) as any;
@@ -202,7 +204,7 @@ export async function pollForUser(userId: string, maxResults: number) {
   });
   const enabled = settings?.gmailAutoPullEnabled ?? false;
   const labelQuery = settings?.gmailLabelQuery ?? env.GMAIL_LABEL_QUERY;
-  console.info("[poll] start", { userId, enabled, maxResults, labelQuery });
+  if (isDev) console.info("[poll] start", { userId, enabled, maxResults, labelQuery });
   if (!enabled) {
     return { ok: true, disabled: true, fetched: 0, proposed: 0, labelQuery } as const;
   }
@@ -296,7 +298,7 @@ export async function pollForUser(userId: string, maxResults: number) {
     const listRes = await fetchWithAuthRetry(listUrl);
     if (!listRes.ok) {
       const errTxt = await listRes.text();
-      console.error("[poll] gmail list failed", { userId, err: errTxt });
+      if (isDev) console.error("[poll] gmail list failed", { userId, err: errTxt });
       await db
         .update(settingsTable)
         .set({ lastPollAt: new Date(), lastPollFetched: 0, lastPollProposed: 0, lastPollError: `Gmail list failed: ${errTxt}` })
@@ -406,7 +408,7 @@ export async function pollForUser(userId: string, maxResults: number) {
       updatedAt: new Date(),
     })
     .where(eq(settingsTable.userId, userId));
-  console.info("[poll] complete", { userId, fetched, proposed, labelQuery, newHistoryId: newHistoryId ?? null });
+  if (isDev) console.info("[poll] complete", { userId, fetched, proposed, labelQuery, newHistoryId: newHistoryId ?? null });
   return { ok: true, disabled: false, fetched, proposed, labelQuery } as const;
 }
 

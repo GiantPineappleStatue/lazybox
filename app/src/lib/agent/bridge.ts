@@ -37,8 +37,18 @@ export const proposeFromEmailBridge = serverOnly(
       : "";
 
     if ((agent as any)?.proposeFromEmail) {
+      // Route memory by user and a stable thread key for proposals
+      const resourceId = params.userId;
+      const threadId = `proposeFromEmail`; // single thread per user for proposals
       return (await (agent as any).proposeFromEmail(params.content, {
-        llm: { provider: llmProvider, model: llmModel, baseUrl: llmBaseUrl, apiKey: llmApiKey },
+        llm: {
+          provider: llmProvider,
+          model: llmModel,
+          baseUrl: llmBaseUrl,
+          apiKey: llmApiKey,
+          resourceId,
+          threadId,
+        },
       })) as ProposedAction[];
     }
     const content = params.content;

@@ -24,7 +24,7 @@ export const ServerRoute = createServerFileRoute("/api/dev/clear").methods({
       await db.delete(emailTable).where(eq(emailTable.userId, userId));
       return Response.json({ ok: true });
     } catch (e: any) {
-      return Response.json({ ok: false, reason: e?.message || "clear failed" }, { status: 500 });
+      return Response.json({ ok: false, code: "DEV_CLEAR_FAILED", message: e?.message || "clear failed" }, { status: 500 });
     }
   },
 });

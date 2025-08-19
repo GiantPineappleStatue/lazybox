@@ -8,13 +8,14 @@ import { email as emailTable, proposal as proposalTable, token as tokenTable, se
 import { eq, and } from "drizzle-orm";
 import { encrypt, decrypt } from "~/lib/crypto/secureStore";
 import { randomUUID, createHash } from "node:crypto";
+import { fetchWithRetry } from "~/lib/http/fetch";
 
 const isDev = process.env.NODE_ENV !== "production";
 
 // In-memory per-process lock map to prevent concurrent polls per user
 const activePolls = new Map<string, Promise<
-  | { ok: true; disabled: boolean; fetched: number; proposed: number; labelQuery: string }
-  | { ok: false; reason: string; fetched: number; proposed: number; labelQuery?: string }
+  | { ok: true; data: { disabled: boolean; fetched: number; proposed: number; labelQuery: string } }
+  | { ok: false; code?: string; message?: string }
 >>();
 
 export const loadEmails = createServerFn()
@@ -41,7 +42,7 @@ export const loadEmails = createServerFn()
       where: (t, ops) => ops.and(ops.eq(t.userId, context.user.id), ops.or(ops.eq(t.provider, "google"), ops.eq(t.provider, "gmail"))),
     });
     if (!tokenRow) {
-      return { emails: [], labelQuery, userId: context.user.id, reason: "No Gmail token" } as const;
+      return { ok: false, code: "GMAIL_NO_TOKEN", message: "No Gmail token" } as const;
     }
 
     let accessToken = "";
@@ -52,24 +53,24 @@ export const loadEmails = createServerFn()
     } catch {}
 
     if (!accessToken) {
-      return { emails: [], labelQuery, userId: context.user.id, reason: "Missing Gmail access token" } as const;
+      return { ok: false, code: "GMAIL_NO_ACCESS_TOKEN", message: "Missing Gmail access token" } as const;
     }
 
     let authHeader = { Authorization: `Bearer ${accessToken}` } as const;
     const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
     listUrl.searchParams.set("q", labelQuery);
     listUrl.searchParams.set("maxResults", String(data.maxResults));
-    let listRes = await fetch(listUrl, { headers: authHeader });
+    let listRes = await fetchWithRetry(listUrl.toString(), { headers: authHeader, timeoutMs: 15000, retries: 2, backoffMs: 500 });
     // Attempt refresh on 401
     if (listRes.status === 401) {
       const refreshed = await tryRefreshToken(context.user.id);
       if (refreshed?.accessToken) {
         authHeader = { Authorization: `Bearer ${refreshed.accessToken}` } as const;
-        listRes = await fetch(listUrl, { headers: authHeader });
+        listRes = await fetchWithRetry(listUrl.toString(), { headers: authHeader, timeoutMs: 15000, retries: 2, backoffMs: 500 });
       }
     }
     if (!listRes.ok) {
-      return { emails: [], labelQuery, userId: context.user.id, reason: `Gmail list failed: ${await listRes.text()}` } as const;
+      return { ok: false, code: "GMAIL_LIST_FAILED", message: `Gmail list failed: ${await listRes.text()}` } as const;
     }
     const listJson = (await listRes.json()) as { messages?: { id: string; threadId: string }[] };
     const messages = listJson.messages ?? [];
@@ -77,12 +78,12 @@ export const loadEmails = createServerFn()
     const emails: { id: string; threadId: string; snippet: string; body: string }[] = [];
     for (const m of messages) {
       const getUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`;
-      let getRes = await fetch(getUrl, { headers: authHeader });
+      let getRes = await fetchWithRetry(getUrl.toString(), { headers: authHeader, timeoutMs: 15000, retries: 2, backoffMs: 500 });
       if (getRes.status === 401) {
         const refreshed = await tryRefreshToken(context.user.id);
         if (refreshed?.accessToken) {
           authHeader = { Authorization: `Bearer ${refreshed.accessToken}` } as const;
-          getRes = await fetch(getUrl, { headers: authHeader });
+          getRes = await fetchWithRetry(getUrl.toString(), { headers: authHeader, timeoutMs: 15000, retries: 2, backoffMs: 500 });
         }
       }
       if (!getRes.ok) continue;
@@ -91,8 +92,7 @@ export const loadEmails = createServerFn()
       const bodyText = extractBodyText(msg);
       emails.push({ id: m.id, threadId: m.threadId, snippet, body: bodyText });
     }
-
-    return { emails, labelQuery, userId: context.user.id } as const;
+    return { ok: true, data: { emails, labelQuery, userId: context.user.id } } as const;
   });
 
 export const proposeActions = createServerFn()
@@ -108,7 +108,7 @@ export const proposeActions = createServerFn()
       throw new Error("Unauthorized");
     }
     const proposals = await proposeFromEmailBridge({ content: data.content, userId: context.user.id });
-    return { proposals, userId: context.user.id } as const;
+    return { ok: true, data: { proposals, userId: context.user.id } } as const;
   });
 
 export const orchestrate = createServerFn()
@@ -127,9 +127,9 @@ export const orchestrate = createServerFn()
     const userId = context.user.id;
     const result = (await orchestrateEmailBridge({ content: data.content, userId, execute: Boolean(data.execute), emailId: data.emailId })) as {
       proposed: ProposedAction[];
-      executed?: Array<{ id: string; actionType: string; ok: boolean; message?: string; reason?: string; data?: Record<string, {}> }>;
+      executed?: Array<{ id: string; actionType: string; ok: boolean; message?: string; code?: string; data?: Record<string, {}> }>;
     };
-    return { ok: true, proposed: result.proposed, executed: result.executed ?? [] } as const;
+    return { ok: true, data: { proposed: result.proposed, executed: result.executed ?? [] } } as const;
   });
 
 export const sendReply = createServerFn()
@@ -151,7 +151,7 @@ export const sendReply = createServerFn()
       where: (t, ops) => ops.and(ops.eq(t.userId, context.user.id), ops.or(ops.eq(t.provider, "google"), ops.eq(t.provider, "gmail"))),
     });
     if (!tokenRow) {
-      return { ok: false, reason: "No Gmail token" } as const;
+      return { ok: false, code: "GMAIL_NO_TOKEN", message: "No Gmail token" } as const;
     }
     let tokenJson: any = {};
     try {
@@ -159,7 +159,7 @@ export const sendReply = createServerFn()
     } catch {}
     let accessToken: string = tokenJson.access_token || tokenJson.accessToken || "";
     if (!accessToken) {
-      return { ok: false, reason: "Missing Gmail access token" } as const;
+      return { ok: false, code: "GMAIL_NO_ACCESS_TOKEN", message: "Missing Gmail access token" } as const;
     }
 
     // Compose MIME message (text/plain)
@@ -174,10 +174,13 @@ export const sendReply = createServerFn()
 
     let authHeader = { Authorization: `Bearer ${accessToken}` } as const;
     const doSend = async () =>
-      await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      await fetchWithRetry("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeader },
         body: JSON.stringify({ raw, threadId: data.threadId }),
+        timeoutMs: 15000,
+        retries: 2,
+        backoffMs: 500,
       });
 
     let res = await doSend();
@@ -191,22 +194,15 @@ export const sendReply = createServerFn()
         res = await doSend();
       }
     }
-    // Light backoff for 429/5xx
-    let attempt = 0;
-    while ((res.status === 429 || res.status >= 500) && attempt < 2) {
-      const delay = 400 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-      await new Promise((r) => setTimeout(r, delay));
-      res = await doSend();
-      attempt++;
-    }
+    // No manual backoff — fetchWithRetry already retried above.
 
     if (!res.ok) {
       const errTxt = await res.text();
       if (isDev) console.error("[gmail] sendReply failed", { userId: context.user.id, status: res.status, err: errTxt });
-      return { ok: false, reason: `Gmail send failed: ${errTxt}` } as const;
+      return { ok: false, code: "GMAIL_SEND_FAILED", message: `Gmail send failed: ${errTxt}` } as const;
     }
     const json = (await res.json()) as any;
-    return { ok: true, id: json.id as string, threadId: json.threadId as string } as const;
+    return { ok: true, data: { id: json.id as string, threadId: json.threadId as string } } as const;
   });
 
 export const poll = createServerFn()
@@ -231,7 +227,7 @@ export const poll = createServerFn()
       if (last && now - last < minIntervalMs) {
         const waitMs = minIntervalMs - (now - last);
         if (isDev) console.info("[poll] throttled", { userId, waitMs });
-        return { ok: false, reason: `Please wait ${Math.ceil(waitMs / 1000)}s before polling again.`, fetched: 0, proposed: 0 } as const;
+        return { ok: false, code: "POLL_THROTTLED", message: `Please wait ${Math.ceil(waitMs / 1000)}s before polling again.` } as const;
       }
     } catch {}
 
@@ -239,7 +235,7 @@ export const poll = createServerFn()
     const existing = activePolls.get(userId);
     if (existing) {
       if (isDev) console.info("[poll] already-running", { userId });
-      return { ok: false, reason: "A poll is already running for this user.", fetched: 0, proposed: 0 } as const;
+      return { ok: false, code: "POLL_CONCURRENT", message: "A poll is already running for this user." } as const;
     }
 
     const inFlight = (async () => await pollForUser(userId, data.maxResults))();
@@ -261,7 +257,7 @@ export async function pollForUser(userId: string, maxResults: number) {
   const labelQuery = settings?.gmailLabelQuery ?? env.GMAIL_LABEL_QUERY;
   if (isDev) console.info("[poll] start", { userId, enabled, maxResults, labelQuery });
   if (!enabled) {
-    return { ok: true, disabled: true, fetched: 0, proposed: 0, labelQuery } as const;
+    return { ok: true, data: { disabled: true, fetched: 0, proposed: 0, labelQuery } } as const;
   }
 
   // Get token JSON
@@ -269,7 +265,7 @@ export async function pollForUser(userId: string, maxResults: number) {
     where: (t, ops) => ops.and(ops.eq(t.userId, userId), ops.or(ops.eq(t.provider, "google"), ops.eq(t.provider, "gmail"))),
   });
   if (!tokenRow) {
-    return { ok: false, reason: "No Gmail token", fetched: 0, proposed: 0, labelQuery } as const;
+    return { ok: false, code: "GMAIL_NO_TOKEN", message: "No Gmail token" } as const;
   }
   let tokenJson: any = {};
   try {
@@ -279,13 +275,21 @@ export async function pollForUser(userId: string, maxResults: number) {
   }
   let accessToken: string = tokenJson.access_token || tokenJson.accessToken || "";
   if (!accessToken) {
-    return { ok: false, reason: "Missing Gmail access token", fetched: 0, proposed: 0, labelQuery } as const;
+    return { ok: false, code: "GMAIL_NO_ACCESS_TOKEN", message: "Missing Gmail access token" } as const;
   }
 
   // Helper that handles 401 refresh + retry/backoff for 429/5xx
   let authHeader = { Authorization: `Bearer ${accessToken}` } as const;
   const fetchWithAuthRetry = async (input: string | URL, init?: RequestInit) => {
-    const doFetch = async () => await fetch(input, { ...(init || {}), headers: { ...(init?.headers || {}), ...authHeader } });
+    const doFetch = async () =>
+      await fetchWithRetry(typeof input === "string" ? input : input.toString(), {
+        method: init?.method || "GET",
+        headers: { ...(init?.headers || {} as any), ...authHeader } as any,
+        body: init?.body as any,
+        timeoutMs: 15000,
+        retries: 3,
+        backoffMs: 500,
+      });
     let res = await doFetch();
     // 401 -> refresh once
     if (res.status === 401) {
@@ -295,14 +299,6 @@ export async function pollForUser(userId: string, maxResults: number) {
         tokenJson = refreshed.tokenJson;
         res = await doFetch();
       }
-    }
-    // Backoff for 429/5xx
-    let attempt = 0;
-    while ((res.status === 429 || res.status >= 500) && attempt < 3) {
-      const delay = 500 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-      await new Promise((r) => setTimeout(r, delay));
-      res = await doFetch();
-      attempt++;
     }
     return res;
   };
@@ -358,7 +354,7 @@ export async function pollForUser(userId: string, maxResults: number) {
         .update(settingsTable)
         .set({ lastPollAt: new Date(), lastPollFetched: 0, lastPollProposed: 0, lastPollError: `Gmail list failed: ${errTxt}` })
         .where(eq(settingsTable.userId, userId));
-      return { ok: false, reason: `Gmail list failed: ${errTxt}`, fetched: 0, proposed: 0, labelQuery } as const;
+      return { ok: false, code: "GMAIL_LIST_FAILED", message: `Gmail list failed: ${errTxt}` } as const;
     }
     const listJson = (await listRes.json()) as { messages?: { id: string; threadId: string }[] };
     const messages = listJson.messages ?? [];
@@ -464,7 +460,7 @@ export async function pollForUser(userId: string, maxResults: number) {
     })
     .where(eq(settingsTable.userId, userId));
   if (isDev) console.info("[poll] complete", { userId, fetched, proposed, labelQuery, newHistoryId: newHistoryId ?? null });
-  return { ok: true, disabled: false, fetched, proposed, labelQuery } as const;
+  return { ok: true, data: { disabled: false, fetched, proposed, labelQuery } } as const;
 }
 
 async function tryRefreshToken(userId: string): Promise<{ accessToken: string } | null> {
@@ -490,10 +486,13 @@ async function doRefresh(tokenId: string, tokenJson: any): Promise<{ accessToken
     grant_type: "refresh_token",
     refresh_token: String(refreshToken),
   });
-  const res = await fetch("https://oauth2.googleapis.com/token", {
+  const res = await fetchWithRetry("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
+    timeoutMs: 10000,
+    retries: 2,
+    backoffMs: 400,
   });
   if (!res.ok) return null;
   const json = await res.json();

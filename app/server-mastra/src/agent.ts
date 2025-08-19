@@ -12,6 +12,7 @@ import * as ShopifyTools from "./shopify/tools.js";
 import * as RechargeTools from "./recharge/tools.js";
 import { ALLOWED_ACTIONS, AllowedAction } from "./shopify/constants.js";
 import { runShopifyAction as runShopifyActionHelper, type ShopifyAuth } from "./shopify/helpers.js";
+import type { Result } from "./types/envelope.js";
 
 const allowedActionsText = ALLOWED_ACTIONS.join(", ");
 
@@ -158,9 +159,7 @@ export async function runShopifyAction(params: {
   actionType: AllowedAction;
   payload: Record<string, unknown>;
   auth: ShopifyAuth;
-}): Promise<
-  | { ok: true; message?: string; data?: Record<string, unknown> }
-  | { ok: false; reason: string; message?: string; details?: Record<string, unknown> }
-> {
+  correlationId?: string;
+}): Promise<Result<Record<string, unknown>>> {
   return runShopifyActionHelper(params);
 }

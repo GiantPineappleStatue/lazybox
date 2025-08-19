@@ -115,9 +115,9 @@ export const executeProposal = createServerFn()
   .handler(async ({ data, context }) => {
     if (!context?.user) throw new Error("Unauthorized");
     const row = await db.query.proposal.findFirst({ where: (t, { and, eq }) => and(eq(t.id, data.proposalId), eq(t.userId, context.user.id)) });
-    if (!row) return { ok: false, reason: "Proposal not found" } as const;
+    if (!row) return { ok: false, code: "proposal_not_found", message: "Proposal not found" } as const;
     if (row.status !== "proposed" && row.status !== "approved") {
-      return { ok: false, reason: `Cannot execute in status ${row.status}` } as const;
+      return { ok: false, code: "invalid_status", message: `Cannot execute in status ${row.status}` } as const;
     }
     const res = await runShopifyActionBridge({ actionType: row.actionType, payload: (row as any).payloadJson || {}, userId: context.user.id });
     const actionId = randomUUID();
@@ -126,11 +126,13 @@ export const executeProposal = createServerFn()
       proposalId: row.id,
       status: res.ok ? "executed" : "failed",
       resultJson: res.ok ? (res as any).data ?? null : null,
-      error: res.ok ? null : (res as any).reason ?? "",
+      error: res.ok ? null : ((res as any).message ?? (res as any).code ?? ""),
       executedAt: new Date(),
     });
     await db.update(proposalTable).set({ status: res.ok ? "executed" : "failed", updatedAt: new Date() }).where(eq(proposalTable.id, row.id));
-    return { ok: res.ok, reason: (res as any).reason, id: actionId } as const;
+    return res.ok
+      ? ({ ok: true, id: actionId } as const)
+      : ({ ok: false, code: (res as any).code ?? "execution_failed", message: (res as any).message ?? "Execution failed", id: actionId } as const);
   });
 
 export const reviewProposal = createServerFn()
@@ -139,9 +141,9 @@ export const reviewProposal = createServerFn()
   .handler(async ({ data, context }) => {
     if (!context?.user) throw new Error("Unauthorized");
     const row = await db.query.proposal.findFirst({ where: (t, { and, eq }) => and(eq(t.id, data.proposalId), eq(t.userId, context.user.id)) });
-    if (!row) return { ok: false, reason: "Proposal not found" } as const;
+    if (!row) return { ok: false, code: "proposal_not_found", message: "Proposal not found" } as const;
     if (row.status !== "proposed" && row.status !== "approved" && row.status !== "rejected") {
-      return { ok: false, reason: `Cannot change status from ${row.status}` } as const;
+      return { ok: false, code: "invalid_status", message: `Cannot change status from ${row.status}` } as const;
     }
     await db.update(proposalTable).set({ status: data.decision, updatedAt: new Date() }).where(eq(proposalTable.id, row.id));
     return { ok: true } as const;

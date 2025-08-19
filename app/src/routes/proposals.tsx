@@ -11,6 +11,9 @@ import {
   bulkReviewProposals,
 } from "~/lib/server/proposals";
 import { poll as pollNow } from "~/lib/server/gmail";
+import { Badge } from "~/components/ui/badge";
+import { Modal } from "~/components/ui/modal";
+import { Button } from "~/components/ui/button";
 
 export const Route = createFileRoute("/proposals")({
   beforeLoad: async ({ context }) => {
@@ -32,6 +35,33 @@ function ProposalsPage() {
   const toggleSelect = (id: string, v?: boolean) => setSelected((s) => ({ ...s, [id]: v ?? !s[id] }));
   const pageLimit = 20;
   const lastPollClickRef = React.useRef<number>(0);
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  const [bulkOpen, setBulkOpen] = React.useState(false);
+  const [bulkDecision, setBulkDecision] = React.useState<"approved" | "rejected">("approved");
+  const tabRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const tabs = [
+    { key: undefined as undefined | string, label: "All" },
+    { key: "proposed", label: "Proposed" },
+    { key: "approved", label: "Approved" },
+    { key: "rejected", label: "Rejected" },
+    { key: "executed", label: "Executed" },
+    { key: "failed", label: "Failed" },
+  ] as const;
+
+  // Read initial filters from URL on mount for shareable links
+  React.useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const s = sp.get("status");
+    const a = sp.get("actionType") ?? "";
+    const qq = sp.get("q") ?? "";
+    const df = sp.get("dateFrom") ?? "";
+    const dt = sp.get("dateTo") ?? "";
+    setStatus((s as any) || undefined);
+    setActionType(a);
+    setQ(qq);
+    setDateFrom(df);
+    setDateTo(dt);
+  }, []);
 
   const settingsQuery = useQuery({
     queryKey: ["settings"],
@@ -111,10 +141,10 @@ function ProposalsPage() {
   const approveMutation = useMutation({
     mutationFn: async (proposalId: string) => {
       const res = await reviewProposal({ data: { proposalId, decision: "approved" } });
-      return res as unknown as { ok: boolean; reason?: string };
+      return res as unknown as { ok: boolean; message?: string; code?: string };
     },
     onSuccess: (res) => {
-      if (!res.ok) return toast.error(res.reason || "Approve failed");
+      if (!res.ok) return toast.error(res.message || res.code || "Approve failed");
       toast.success("Proposal approved");
       qc.invalidateQueries({ queryKey: ["proposals"] });
     },
@@ -124,10 +154,10 @@ function ProposalsPage() {
   const rejectMutation = useMutation({
     mutationFn: async (proposalId: string) => {
       const res = await reviewProposal({ data: { proposalId, decision: "rejected" } });
-      return res as unknown as { ok: boolean; reason?: string };
+      return res as unknown as { ok: boolean; message?: string; code?: string };
     },
     onSuccess: (res) => {
-      if (!res.ok) return toast.error(res.reason || "Reject failed");
+      if (!res.ok) return toast.error(res.message || res.code || "Reject failed");
       toast.success("Proposal rejected");
       qc.invalidateQueries({ queryKey: ["proposals"] });
     },
@@ -137,10 +167,10 @@ function ProposalsPage() {
   const bulkReview = useMutation({
     mutationFn: async (input: { ids: string[]; decision: "approved" | "rejected" }) => {
       const res = await bulkReviewProposals({ data: { proposalIds: input.ids, decision: input.decision } });
-      return res as unknown as { ok: boolean; updated?: string[]; reason?: string };
+      return res as unknown as { ok: boolean; updated?: string[]; message?: string; code?: string };
     },
     onSuccess: (res) => {
-      if (!res.ok) return toast.error(res.reason || "Bulk review failed");
+      if (!res.ok) return toast.error(res.message || res.code || "Bulk review failed");
       toast.success(`Updated ${res.updated?.length ?? 0} proposal(s)`);
       setSelected({});
       qc.invalidateQueries({ queryKey: ["proposals"] });
@@ -152,10 +182,10 @@ function ProposalsPage() {
   const executeMutation = useMutation({
     mutationFn: async (proposalId: string) => {
       const res = await executeProposal({ data: { proposalId } });
-      return res as unknown as { ok: boolean; reason?: string };
+      return res as unknown as { ok: boolean; message?: string; code?: string };
     },
     onSuccess: (res) => {
-      if (!res.ok) return toast.error(res.reason || "Execute failed");
+      if (!res.ok) return toast.error(res.message || res.code || "Execute failed");
       toast.success("Execution complete");
       qc.invalidateQueries({ queryKey: ["proposals"] });
     },
@@ -166,15 +196,21 @@ function ProposalsPage() {
     mutationFn: async () => {
       const now = Date.now();
       if (now - (lastPollClickRef.current || 0) < 5000) {
-        return { ok: false, reason: "Please wait a few seconds before polling again." } as any;
+        return { ok: false, message: "Please wait a few seconds before polling again." } as any;
       }
       lastPollClickRef.current = now;
       const res = await pollNow({ data: { maxResults: 25 } });
-      return res as unknown as { ok: boolean; reason?: string; fetched?: number; proposed?: number };
+      return res as unknown as {
+        ok: boolean;
+        data?: { disabled: boolean; fetched: number; proposed: number; labelQuery?: string };
+        message?: string;
+        code?: string;
+      };
     },
     onSuccess: (res) => {
-      if (!res.ok) return toast.error(res.reason || "Poll failed");
-      toast.success(`Poll complete. Fetched ${res.fetched ?? 0}, proposed ${res.proposed ?? 0}`);
+      if (!res.ok) return toast.error(res.message || res.code || "Poll failed");
+      if (res.data?.disabled) return toast.message("Polling disabled", { description: "Enable auto-pull to run in background." });
+      toast.success(`Poll complete. Fetched ${res.data?.fetched ?? 0}, proposed ${res.data?.proposed ?? 0}`);
       qc.invalidateQueries({ queryKey: ["settings"] });
       qc.invalidateQueries({ queryKey: ["proposals"] });
     },
@@ -186,26 +222,43 @@ function ProposalsPage() {
       <div className="flex items-center justify-between" data-testid="proposals-header">
         <h1 className="text-2xl font-semibold">Proposals</h1>
         <div className="flex items-center gap-2">
-          <div className="hidden sm:flex items-center gap-1" data-testid="status-tabs">
-            {([
-              { key: undefined, label: "All", count: Object.values(countsQuery.data?.counts || {}).reduce((a, b) => a + b, 0) },
-              { key: "proposed", label: "Proposed", count: countsQuery.data?.counts?.proposed ?? 0 },
-              { key: "approved", label: "Approved", count: countsQuery.data?.counts?.approved ?? 0 },
-              { key: "rejected", label: "Rejected", count: countsQuery.data?.counts?.rejected ?? 0 },
-              { key: "executed", label: "Executed", count: countsQuery.data?.counts?.executed ?? 0 },
-              { key: "failed", label: "Failed", count: countsQuery.data?.counts?.failed ?? 0 },
-            ] as const).map((t) => (
-              <button
-                key={String(t.key ?? "all")}
-                className={`px-2 py-1 rounded border text-sm ${status === t.key || (!status && t.key === undefined) ? "bg-gray-900 text-white" : "bg-white"}`}
-                onClick={() => setStatus(t.key as any)}
-              >
-                {t.label} {countsQuery.isLoading ? "…" : `(${t.count})`}
-              </button>
-            ))}
+          <div
+            className="hidden sm:flex items-center gap-1"
+            data-testid="status-tabs"
+            role="tablist"
+            aria-label="Status Tabs"
+          >
+            {tabs.map((t, idx) => {
+              const selected = status === t.key || (!status && t.key === undefined);
+              const count = t.key
+                ? (countsQuery.data?.counts as any)?.[t.key] ?? 0
+                : Object.values(countsQuery.data?.counts || {}).reduce((a: number, b: number) => a + b, 0);
+              return (
+                <button
+                  key={String(t.key ?? "all")}
+                  ref={(el) => (tabRefs.current[idx] = el)}
+                  role="tab"
+                  aria-selected={selected}
+                  tabIndex={selected ? 0 : -1}
+                  className={`px-2 py-1 rounded border text-sm ${selected ? "bg-gray-900 text-white" : "bg-white"}`}
+                  onClick={() => setStatus(t.key as any)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+                    e.preventDefault();
+                    const dir = e.key === "ArrowRight" ? 1 : -1;
+                    const current = tabs.findIndex((tt) => (status == null ? tt.key === undefined : tt.key === status));
+                    const next = (current + dir + tabs.length) % tabs.length;
+                    setStatus(tabs[next].key as any);
+                    tabRefs.current[next]?.focus();
+                  }}
+                >
+                  {t.label} {countsQuery.isLoading ? "…" : `(${count})`}
+                </button>
+              );
+            })}
           </div>
-          <button
-            className="px-3 py-2 border rounded"
+          <Button
+            variant="outline"
             onClick={() => {
               qc.removeQueries({ queryKey: ["proposals"] });
               qc.removeQueries({ queryKey: ["proposal-counts"] });
@@ -214,28 +267,39 @@ function ProposalsPage() {
             data-testid="refresh"
           >
             Refresh
-          </button>
-          <button
-            className="px-3 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+          </Button>
+          <Button
             disabled={pollMutation.isPending}
             onClick={() => pollMutation.mutate()}
             data-testid="poll-now"
+            aria-busy={pollMutation.isPending}
           >
             {pollMutation.isPending ? "Polling…" : "Poll Now"}
-          </button>
+          </Button>
         </div>
       </div>
 
       <div className="flex flex-wrap items-end gap-2" data-testid="filters">
-        <input data-testid="filter-actionType" value={actionType} onChange={(e) => setActionType(e.target.value)} placeholder="Action type" className="border rounded p-2 text-sm" />
-        <input data-testid="filter-q" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search text" className="border rounded p-2 text-sm w-56" />
-        <label className="text-xs text-gray-600">From</label>
-        <input data-testid="filter-dateFrom" type="datetime-local" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border rounded p-1 text-sm" />
-        <label className="text-xs text-gray-600">To</label>
-        <input data-testid="filter-dateTo" type="datetime-local" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="border rounded p-1 text-sm" />
-        <button
-          className="px-3 py-2 border rounded"
+        <input aria-label="Filter by action type" data-testid="filter-actionType" value={actionType} onChange={(e) => setActionType(e.target.value)} placeholder="Action type" className="border rounded p-2 text-sm" />
+        <input aria-label="Search proposals" data-testid="filter-q" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search text" className="border rounded p-2 text-sm w-56" />
+        <label className="text-xs text-gray-600" htmlFor="date-from">From</label>
+        <input id="date-from" aria-label="Filter from date" data-testid="filter-dateFrom" type="datetime-local" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border rounded p-1 text-sm" />
+        <label className="text-xs text-gray-600" htmlFor="date-to">To</label>
+        <input id="date-to" aria-label="Filter to date" data-testid="filter-dateTo" type="datetime-local" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="border rounded p-1 text-sm" />
+        <Button
+          variant="outline"
           onClick={() => {
+            // Persist filters to URL
+            const sp = new URLSearchParams();
+            if (status) sp.set("status", status);
+            if (actionType) sp.set("actionType", actionType);
+            if (q) sp.set("q", q);
+            if (dateFrom) sp.set("dateFrom", dateFrom);
+            if (dateTo) sp.set("dateTo", dateTo);
+            const qs = sp.toString();
+            const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+            window.history.replaceState(null, "", url);
+
             qc.removeQueries({ queryKey: ["proposals"] });
             qc.removeQueries({ queryKey: ["proposal-counts"] });
             proposalsQuery.refetch();
@@ -244,34 +308,52 @@ function ProposalsPage() {
           data-testid="apply-filters"
         >
           Apply
-        </button>
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setStatus(undefined);
+            setActionType("");
+            setQ("");
+            setDateFrom("");
+            setDateTo("");
+            window.history.replaceState(null, "", window.location.pathname);
+            qc.removeQueries({ queryKey: ["proposals"] });
+            qc.removeQueries({ queryKey: ["proposal-counts"] });
+            proposalsQuery.refetch();
+            countsQuery.refetch();
+          }}
+          data-testid="reset-filters"
+        >
+          Reset
+        </Button>
         <div className="ml-auto flex items-center gap-2">
-          <button
-            className="px-3 py-2 border rounded disabled:opacity-50"
+          <Button
+            variant="outline"
             disabled={bulkReview.isPending || Object.keys(selected).filter((k) => selected[k]).length === 0}
             onClick={() => {
               const ids = Object.keys(selected).filter((k) => selected[k]);
               if (ids.length === 0) return;
-              if (!window.confirm(`Approve ${ids.length} selected proposal(s)?`)) return;
-              bulkReview.mutate({ ids, decision: "approved" });
+              setBulkDecision("approved");
+              setBulkOpen(true);
             }}
             data-testid="bulk-approve"
           >
             Bulk Approve
-          </button>
-          <button
-            className="px-3 py-2 border rounded disabled:opacity-50"
+          </Button>
+          <Button
+            variant="destructive"
             disabled={bulkReview.isPending || Object.keys(selected).filter((k) => selected[k]).length === 0}
             onClick={() => {
               const ids = Object.keys(selected).filter((k) => selected[k]);
               if (ids.length === 0) return;
-              if (!window.confirm(`Reject ${ids.length} selected proposal(s)?`)) return;
-              bulkReview.mutate({ ids, decision: "rejected" });
+              setBulkDecision("rejected");
+              setBulkOpen(true);
             }}
             data-testid="bulk-reject"
           >
             Bulk Reject
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -307,7 +389,15 @@ function ProposalsPage() {
       </div>
 
       {proposalsQuery.isLoading ? (
-        <div>Loading…</div>
+        <div className="space-y-3" aria-busy="true" aria-live="polite">
+          {[0,1,2].map((i) => (
+            <div key={i} className="border rounded p-3 animate-pulse">
+              <div className="h-5 w-40 bg-gray-200 rounded" />
+              <div className="mt-2 h-3 w-3/4 bg-gray-200 rounded" />
+              <div className="mt-2 h-24 w-full bg-gray-100 rounded" />
+            </div>
+          ))}
+        </div>
       ) : proposalsQuery.isError ? (
         <div className="text-red-600">Failed to load proposals</div>
       ) : (
@@ -319,7 +409,21 @@ function ProposalsPage() {
                   <input data-testid="proposal-checkbox" type="checkbox" checked={!!selected[p.id]} onChange={(e) => toggleSelect(p.id, e.target.checked)} />
                   <div className="font-medium">{p.actionType}</div>
                 </div>
-                <span className="text-xs rounded px-2 py-1 border capitalize" data-testid="proposal-status">{p.status}</span>
+                <Badge
+                  className="capitalize"
+                  data-testid="proposal-status"
+                  variant={
+                    p.status === "approved"
+                      ? "success"
+                      : p.status === "executed"
+                      ? "success"
+                      : p.status === "rejected" || p.status === "failed"
+                      ? "destructive"
+                      : "muted"
+                  }
+                >
+                  {p.status}
+                </Badge>
               </div>
               <div className="text-xs text-gray-600 mt-1">
                 <div>
@@ -350,30 +454,42 @@ function ProposalsPage() {
                 </div>
               ) : null}
               <div className="text-sm text-gray-700 mt-2">
-                <pre className="whitespace-pre-wrap break-words text-xs bg-gray-50 border rounded p-2 max-h-48 overflow-auto">{JSON.stringify(p.payloadJson, null, 2)}</pre>
+                <button
+                  type="button"
+                  className="text-xs underline"
+                  onClick={() => setExpanded((e) => ({ ...e, [p.id]: !e[p.id] }))}
+                  data-testid="toggle-payload"
+                >
+                  {expanded[p.id] ? "Hide payload" : "Show payload"}
+                </button>
+                {expanded[p.id] ? (
+                  <pre className="mt-1 whitespace-pre-wrap break-words text-xs bg-gray-50 border rounded p-2 max-h-48 overflow-auto">{JSON.stringify(p.payloadJson, null, 2)}</pre>
+                ) : null}
               </div>
               <div className="flex gap-2 mt-3">
-                <button
-                  className="px-3 py-1.5 bg-emerald-600 text-white rounded disabled:opacity-50"
+                <Button
+                  variant="secondary"
                   disabled={approveMutation.isPending || p.status !== "proposed"}
                   onClick={() => approveMutation.mutate(p.id)}
+                  aria-busy={approveMutation.isPending}
                 >
                   {approveMutation.isPending ? "Approving…" : "Approve"}
-                </button>
-                <button
-                  className="px-3 py-1.5 bg-amber-600 text-white rounded disabled:opacity-50"
+                </Button>
+                <Button
+                  variant="destructive"
                   disabled={rejectMutation.isPending || (p.status !== "proposed" && p.status !== "approved")}
                   onClick={() => rejectMutation.mutate(p.id)}
+                  aria-busy={rejectMutation.isPending}
                 >
                   {rejectMutation.isPending ? "Rejecting…" : "Reject"}
-                </button>
-                <button
-                  className="px-3 py-1.5 bg-blue-600 text-white rounded disabled:opacity-50"
+                </Button>
+                <Button
                   disabled={executeMutation.isPending || (p.status !== "proposed" && p.status !== "approved")}
                   onClick={() => executeMutation.mutate(p.id)}
+                  aria-busy={executeMutation.isPending}
                 >
                   {executeMutation.isPending ? "Executing…" : "Execute"}
-                </button>
+                </Button>
               </div>
               <ActionDetails proposalId={p.id} visible={p.status === "executed" || p.status === "failed"} />
             </div>
@@ -382,20 +498,47 @@ function ProposalsPage() {
             <div className="text-sm text-gray-600">No proposals found.</div>
           ) : null}
           <div className="pt-2">
-            <button
-              className="px-3 py-2 border rounded disabled:opacity-50"
+            <Button
+              variant="outline"
               disabled={!proposalsQuery.hasNextPage || proposalsQuery.isFetchingNextPage}
               onClick={() => proposalsQuery.fetchNextPage()}
               data-testid="load-more"
+              aria-busy={proposalsQuery.isFetchingNextPage}
             >
               {proposalsQuery.isFetchingNextPage ? "Loading…" : proposalsQuery.hasNextPage ? "Load More" : "No More"}
-            </button>
+            </Button>
             {proposalsQuery.data?.pages?.[0]?.page?.totalCount != null ? (
               <span className="ml-3 text-xs text-gray-600">Total: {proposalsQuery.data?.pages?.[0]?.page?.totalCount}</span>
             ) : null}
           </div>
         </div>
       )}
+      <Modal
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        title={bulkDecision === "approved" ? "Confirm Bulk Approve" : "Confirm Bulk Reject"}
+        >
+        <div className="space-y-2">
+          <div>
+            You are about to {bulkDecision} {Object.keys(selected).filter((k) => selected[k]).length} proposal(s).
+          </div>
+        </div>
+        {/* footer injected via children order to keep Modal simple */}
+        <div className="mt-3 flex justify-end gap-2">
+          <Button variant="outline" onClick={() => setBulkOpen(false)} data-testid="cancel-bulk">Cancel</Button>
+          <Button
+            onClick={() => {
+              const ids = Object.keys(selected).filter((k) => selected[k]);
+              if (ids.length === 0) return setBulkOpen(false);
+              bulkReview.mutate({ ids, decision: bulkDecision });
+              setBulkOpen(false);
+            }}
+            data-testid="confirm-bulk"
+          >
+            Confirm
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

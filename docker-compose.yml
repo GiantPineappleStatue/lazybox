@@ -13,6 +13,11 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   app:
     build:
@@ -21,6 +26,8 @@ services:
     container_name: tanstarter-app
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     environment:
       # App base URL for Better Auth and redirects
       - VITE_BASE_URL=http://localhost:3000
@@ -38,13 +45,21 @@ services:
       - SHOPIFY_API_KEY=${SHOPIFY_API_KEY:-}
       - SHOPIFY_API_SECRET=${SHOPIFY_API_SECRET:-}
       - SHOPIFY_SCOPES=${SHOPIFY_SCOPES:-}
-      - SHOPIFY_REDIRECT=${SHOPIFY_REDIRECT:-http://localhost:3000/api/shopify/callback}
+      - SHOPIFY_REDIRECT_URI=${SHOPIFY_REDIRECT_URI:-http://localhost:3000/api/shopify/callback}
       - SHOPIFY_SHOP=${SHOPIFY_SHOP:-r901.myshopify.com}
+      - SHOPIFY_API_VERSION=${SHOPIFY_API_VERSION:-2024-10}
     volumes:
       - ./app:/app
       - app_node_modules:/app/node_modules
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/api/health', r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
 
 volumes:
   db_data:

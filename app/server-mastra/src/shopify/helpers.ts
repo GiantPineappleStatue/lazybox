@@ -1,10 +1,17 @@
-import { safeJson, toObj } from "../utils/http.js";
+import { safeJson, toObj, fetchWithRetry } from "../utils/http.js";
 import type { AllowedAction } from "./constants.js";
+import type { Result } from "../types/envelope.js";
 
 export type ShopifyAuth = { shop: string; accessToken: string };
 
+export function isValidShopDomain(shop: string): boolean {
+  // Basic allowlist for myshopify domains. Adjust if using custom domains.
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.myshopify\.com$/i.test(shop);
+}
+
 export function shopifyApiBase(shop: string, version = "2024-10") {
-  return `https://${shop}/admin/api/${version}`;
+  const apiVersion = process.env.SHOPIFY_API_VERSION || version;
+  return `https://${shop}/admin/api/${apiVersion}`;
 }
 
 // Helper to build a free replacement draft order body (handles variant/custom items)
@@ -42,10 +49,11 @@ export async function runShopifyAction(params: {
   actionType: AllowedAction;
   payload: Record<string, unknown>;
   auth: ShopifyAuth;
-}): Promise<
-  | { ok: true; message?: string; data?: Record<string, unknown> }
-  | { ok: false; reason: string; message?: string; details?: Record<string, unknown> }
-> {
+  correlationId?: string;
+}): Promise<Result<Record<string, unknown>>> {
+  if (!isValidShopDomain(params.auth.shop)) {
+    return { ok: false, code: "InvalidShopDomain", message: "Invalid Shopify shop domain" };
+  }
   const baseUrl = shopifyApiBase(params.auth.shop);
   const headers = {
     "Content-Type": "application/json",
@@ -55,52 +63,57 @@ export async function runShopifyAction(params: {
   try {
     switch (params.actionType) {
       case "cancel_order": {
-        const orderId = params.payload["order_id"] as string | number | undefined;
-        if (!orderId) return { ok: false, reason: "Missing order_id", message: "Missing order_id" };
-        const res = await fetch(`${baseUrl}/orders/${orderId}/cancel.json`, {
+        const raw = params.payload["order_id"] as string | number | undefined;
+        const orderId = Number(raw);
+        if (!Number.isFinite(orderId) || orderId <= 0) return { ok: false, code: "InvalidInput", message: "Invalid order_id" };
+        const res = await fetchWithRetry(`${baseUrl}/orders/${orderId}/cancel.json`, {
           method: "POST",
-          headers,
+          headers: { ...headers },
+          correlationId: params.correlationId,
         });
-        if (!res.ok) return { ok: false, reason: "Shopify cancel failed", message: "Shopify cancel failed", details: toObj(await safeJson(res)) };
+        if (!res.ok) return { ok: false, code: "ShopifyCancelFailed", message: "Shopify cancel failed", data: toObj(await safeJson(res)) };
         return { ok: true, message: "Order cancelled", data: toObj(await safeJson(res)) };
       }
       case "update_address": {
-        const orderId = params.payload["order_id"] as string | number | undefined;
+        const raw = params.payload["order_id"] as string | number | undefined;
+        const orderId = Number(raw);
         const address = params.payload["shipping_address"] as Record<string, unknown> | undefined;
-        if (!orderId || !address) return { ok: false, reason: "Missing order_id or shipping_address", message: "Missing order_id or shipping_address" };
+        if (!Number.isFinite(orderId) || orderId <= 0 || !address) return { ok: false, code: "InvalidInput", message: "Missing order_id or shipping_address" };
         const body = JSON.stringify({ order: { id: orderId, shipping_address: address } });
-        const res = await fetch(`${baseUrl}/orders/${orderId}.json`, {
+        const res = await fetchWithRetry(`${baseUrl}/orders/${orderId}.json`, {
           method: "PUT",
-          headers,
+          headers: { ...headers },
           body,
+          correlationId: params.correlationId,
         });
-        if (!res.ok) return { ok: false, reason: "Shopify address update failed", message: "Shopify address update failed", details: toObj(await safeJson(res)) };
+        if (!res.ok) return { ok: false, code: "ShopifyAddressUpdateFailed", message: "Shopify address update failed", data: toObj(await safeJson(res)) };
         return { ok: true, message: "Shipping address updated", data: toObj(await safeJson(res)) };
       }
       case "resend_order": {
-        const orderId = params.payload["order_id"] as string | number | undefined;
+        const raw = params.payload["order_id"] as string | number | undefined;
+        const orderId = Number(raw);
         const note = (params.payload["note"] as string | undefined) || "Replacement order at no charge";
         const sendInvoice = Boolean(params.payload["send_invoice"]);
         const invoiceTo = params.payload["invoice_to"] as string | undefined;
-        if (!orderId) return { ok: false, reason: "Missing order_id", message: "Missing order_id" };
+        if (!Number.isFinite(orderId) || orderId <= 0) return { ok: false, code: "InvalidInput", message: "Invalid order_id" };
 
         // Load original order
-        const orderRes = await fetch(`${baseUrl}/orders/${orderId}.json`, { headers });
-        if (!orderRes.ok) return { ok: false, reason: "Order not found", message: "Order not found", details: toObj(await safeJson(orderRes)) };
+        const orderRes = await fetchWithRetry(`${baseUrl}/orders/${orderId}.json`, { headers: { ...headers }, correlationId: params.correlationId });
+        if (!orderRes.ok) return { ok: false, code: "NotFound", message: "Order not found", data: toObj(await safeJson(orderRes)) };
         const order = (await safeJson(orderRes) as any)?.order;
-        if (!order) return { ok: false, reason: "Order not found", message: "Order not found" };
+        if (!order) return { ok: false, code: "NotFound", message: "Order not found" };
 
         // Build free replacement draft order
         const draftBody = buildReplacementDraftBody(order, note);
-        const draftRes = await fetch(`${baseUrl}/draft_orders.json`, { method: "POST", headers, body: JSON.stringify(draftBody) });
-        if (!draftRes.ok) return { ok: false, reason: "Draft order creation failed", message: "Draft order creation failed", details: toObj(await safeJson(draftRes)) };
+        const draftRes = await fetchWithRetry(`${baseUrl}/draft_orders.json`, { method: "POST", headers: { ...headers }, body: JSON.stringify(draftBody), correlationId: params.correlationId });
+        if (!draftRes.ok) return { ok: false, code: "DraftCreationFailed", message: "Draft order creation failed", data: toObj(await safeJson(draftRes)) };
         const draftData = await safeJson(draftRes);
         const draftOrderId = (draftData as any)?.draft_order?.id;
 
         // Optionally send invoice
         if (sendInvoice && draftOrderId) {
           const invoiceBody = JSON.stringify({ draft_order_invoice: invoiceTo ? { to: invoiceTo } : {} });
-          const invRes = await fetch(`${baseUrl}/draft_orders/${draftOrderId}/send_invoice.json`, { method: "POST", headers, body: invoiceBody });
+          const invRes = await fetchWithRetry(`${baseUrl}/draft_orders/${draftOrderId}/send_invoice.json`, { method: "POST", headers: { ...headers }, body: invoiceBody, correlationId: params.correlationId });
           if (!invRes.ok) {
             return { ok: true, message: "Replacement draft created; invoice failed to send", data: { draftOrderId } as Record<string, unknown> };
           }
@@ -109,9 +122,9 @@ export async function runShopifyAction(params: {
         return { ok: true, message: "Replacement draft created", data: { draftOrderId } as Record<string, unknown> };
       }
       default:
-        return { ok: false, reason: "Unsupported actionType" };
+        return { ok: false, code: "UnsupportedAction", message: "Unsupported actionType" };
     }
   } catch (e) {
-    return { ok: false, reason: "Exception during Shopify call", message: "Exception during Shopify call", details: { error: String(e) } as Record<string, unknown> };
+    return { ok: false, code: "Exception", message: "Exception during Shopify call", data: { error: String(e) } as Record<string, unknown> };
   }
 }

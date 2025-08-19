@@ -25,17 +25,18 @@ export const ServerRoute = createServerFileRoute("/api/cron/gmail-poll").methods
       .where(eq(settingsTable.gmailAutoPullEnabled, true));
     if (isDev) console.info("[cron] gmail-poll users", { count: rows.length });
 
-    const results: Array<{ userId: string; fetched: number; proposed: number; disabled?: boolean; ok?: boolean; reason?: string }> = [];
+    const results: Array<{ userId: string; ok: boolean; data?: { disabled: boolean; fetched: number; proposed: number; labelQuery?: string }; code?: string; message?: string }> = [];
     for (const r of rows) {
       const res = await pollForUser(r.userId, maxResults);
       results.push({ userId: r.userId, ...(res as any) });
       if (isDev) console.info("[cron] gmail-poll user", {
         userId: r.userId,
-        ok: (res as any).ok !== false,
-        disabled: (res as any).disabled ?? false,
-        fetched: (res as any).fetched ?? 0,
-        proposed: (res as any).proposed ?? 0,
-        reason: (res as any).reason,
+        ok: (res as any).ok === true,
+        disabled: (res as any).data?.disabled ?? false,
+        fetched: (res as any).data?.fetched ?? 0,
+        proposed: (res as any).data?.proposed ?? 0,
+        code: (res as any).code,
+        message: (res as any).message,
       });
     }
 

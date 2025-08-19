@@ -5,7 +5,7 @@ export type ExecutionRecord = {
   actionType: ProposedAction["actionType"];
   ok: boolean;
   message?: string;
-  reason?: string;
+  code?: string;
   data?: Record<string, unknown>;
 };
 

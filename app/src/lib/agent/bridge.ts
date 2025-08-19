@@ -82,8 +82,8 @@ export const runShopifyActionBridge = serverOnly(async (params: {
   payload: Record<string, unknown>;
   userId: string;
 }): Promise<
-  | { ok: true; message?: string; data?: Record<string, {}> }
-  | { ok: false; reason: string; details?: Record<string, {}> }
+  | { ok: true; code?: string; message?: string; data?: Record<string, {}> }
+  | { ok: false; code: string; message: string; data?: Record<string, {}> }
 > => {
   const agent = await loadMastraAgent();
   // Resolve Shopify auth for the user
@@ -91,7 +91,7 @@ export const runShopifyActionBridge = serverOnly(async (params: {
     where: (t, { and, eq }) => and(eq(t.userId, params.userId), eq(t.provider, "shopify")),
   });
   if (!row) {
-    return { ok: false, reason: "Missing Shopify token" } as const;
+    return { ok: false, code: "shopify_auth_missing", message: "Missing Shopify token" } as const;
   }
   const tokenJson = JSON.parse(decrypt(row.encryptedToken) || "{}") as { access_token?: string; scope?: string };
   const accessToken = tokenJson.access_token;
@@ -99,7 +99,7 @@ export const runShopifyActionBridge = serverOnly(async (params: {
   const s = await db.query.settings.findFirst({ where: (t, { eq }) => eq(t.userId, params.userId) });
   const shop = s?.shopDomain || (row.meta as any)?.shop || env.SHOPIFY_SHOP;
   if (!accessToken || !shop) {
-    return { ok: false, reason: "Invalid Shopify auth" } as const;
+    return { ok: false, code: "shopify_auth_invalid", message: "Invalid Shopify auth" } as const;
   }
   if (agent?.runShopifyAction) {
     return agent.runShopifyAction({
@@ -107,12 +107,12 @@ export const runShopifyActionBridge = serverOnly(async (params: {
       payload: params.payload,
       auth: { shop, accessToken },
     } as any) as Promise<
-      | { ok: true; message?: string; data?: Record<string, {}> }
-      | { ok: false; reason: string; details?: Record<string, {}> }
+      | { ok: true; code?: string; message?: string; data?: Record<string, {}> }
+      | { ok: false; code: string; message: string; data?: Record<string, {}> }
     >;
   }
   // Fallback: just echo without executing
-  return { ok: false, reason: "Mastra agent not configured" } as const;
+  return { ok: false, code: "agent_not_configured", message: "Mastra agent not configured" } as const;
 });
 
 export const orchestrateEmailBridge = serverOnly(
@@ -164,7 +164,7 @@ export const orchestrateEmailBridge = serverOnly(
               .onConflictDoNothing({ target: [proposalTable.emailId, proposalTable.actionType, proposalTable.payloadHash] });
           }
         },
-        onExecuted: async (executed: Array<{ id: string; actionType: string; ok: boolean; message?: string; reason?: string; data?: Record<string, unknown> }>) => {
+        onExecuted: async (executed: Array<{ id: string; actionType: string; ok: boolean; message?: string; code?: string; data?: Record<string, unknown> }>) => {
           for (const rec of executed) {
             // action id == proposal id for traceability
             await db.insert(actionTable).values({
@@ -172,7 +172,7 @@ export const orchestrateEmailBridge = serverOnly(
               proposalId: rec.id,
               status: rec.ok ? "executed" : "failed",
               resultJson: rec.ok ? (rec.data ?? null) : null,
-              error: rec.ok ? null : rec.reason ?? rec.message ?? "",
+              error: rec.ok ? null : rec.message ?? rec.code ?? "",
               executedAt: new Date(),
             }).onConflictDoNothing();
             // update proposal status

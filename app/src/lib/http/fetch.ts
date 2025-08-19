@@ -1,8 +1,5 @@
-import type { IncomingMessage } from "http";
 import { randomUUID } from "node:crypto";
-import { logRetry } from "../observability/logger.js";
 
-// Safely parse JSON, falling back to text when necessary
 export async function safeJson(res: any): Promise<unknown> {
   try {
     return await res.json();
@@ -20,7 +17,6 @@ export function toObj(v: unknown): Record<string, unknown> {
   return { value: v as unknown } as Record<string, unknown>;
 }
 
-// Simple sleep utility with jitter support
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -29,11 +25,10 @@ export type FetchWithRetryOptions = {
   method?: string;
   headers?: Record<string, string>;
   body?: any;
-  timeoutMs?: number; // per-attempt timeout
-  retries?: number; // number of additional retries on retryable conditions
-  backoffMs?: number; // base backoff
-  idempotencyKey?: string; // for mutating requests; auto-generated if omitted
-  correlationId?: string; // for observability; forwarded as X-Correlation-Id
+  timeoutMs?: number;
+  retries?: number;
+  backoffMs?: number;
+  idempotencyKey?: string;
   onRetry?: (info: { attempt: number; waitMs: number; reason: "response" | "error"; status?: number }) => void;
 };
 
@@ -43,28 +38,13 @@ function shouldRetryResponse(res: Response): boolean {
   return false;
 }
 
-export async function fetchWithRetry(
-  url: string,
-  opts: FetchWithRetryOptions = {},
-): Promise<Response> {
-  const {
-    method = "GET",
-    headers = {},
-    body,
-    timeoutMs = 15000,
-    retries = 2,
-    backoffMs = 500,
-    idempotencyKey,
-    correlationId,
-  } = opts;
+export async function fetchWithRetry(url: string, opts: FetchWithRetryOptions = {}): Promise<Response> {
+  const { method = "GET", headers = {}, body, timeoutMs = 15000, retries = 2, backoffMs = 500, idempotencyKey } = opts;
 
   const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
   const baseHeaders: Record<string, string> = { ...headers };
   if (isMutating && !baseHeaders["X-Idempotency-Key"]) {
     baseHeaders["X-Idempotency-Key"] = idempotencyKey || randomUUID();
-  }
-  if (correlationId && !baseHeaders["X-Correlation-Id"]) {
-    baseHeaders["X-Correlation-Id"] = correlationId;
   }
 
   let attempt = 0;
@@ -73,32 +53,26 @@ export async function fetchWithRetry(
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
-        method,
-        headers: baseHeaders,
-        body,
-        signal: controller.signal,
-      } as RequestInit);
+      const res = await fetch(url, { method, headers: baseHeaders, body, signal: controller.signal } as RequestInit);
       clearTimeout(t);
       if (attempt < retries && shouldRetryResponse(res)) {
         const retryAfter = Number(res.headers.get("retry-after")) || 0;
         const wait = retryAfter > 0 ? retryAfter * 1000 : backoffMs * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
         try {
-          logRetry(correlationId, { attempt: attempt + 1, waitMs: wait, reason: "response", status: res.status });
+          opts.onRetry?.({ attempt: attempt + 1, waitMs: wait, reason: "response", status: res.status });
         } catch {}
-        try { (opts.onRetry)?.({ attempt: attempt + 1, waitMs: wait, reason: "response", status: res.status }); } catch {}
         await sleep(wait);
         attempt++;
         continue;
       }
       return res;
-    } catch (err: any) {
+    } catch (err) {
       clearTimeout(t);
-      // Only retry on network/abort errors
       if (attempt < retries) {
         const wait = backoffMs * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
-        try { logRetry(correlationId, { attempt: attempt + 1, waitMs: wait, reason: "error" }); } catch {}
-        try { (opts.onRetry)?.({ attempt: attempt + 1, waitMs: wait, reason: "error" }); } catch {}
+        try {
+          opts.onRetry?.({ attempt: attempt + 1, waitMs: wait, reason: "error" });
+        } catch {}
         await sleep(wait);
         attempt++;
         continue;

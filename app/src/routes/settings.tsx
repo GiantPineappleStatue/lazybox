@@ -3,6 +3,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { poll, orchestrate } from "~/lib/server/gmail";
+import { Button } from "~/components/ui/button";
 
 export const Route = createFileRoute("/settings")({
   beforeLoad: async ({ context }) => {
@@ -46,15 +47,20 @@ function SettingsPage() {
   const orchestrateMutation = useMutation({
     mutationFn: async () => {
       const res = await orchestrate({ data: { emailId: orch.emailId, content: orch.content, execute: orch.execute } });
-      return res as unknown as { ok: boolean; proposed: Array<{ id: string; actionType: string }>; executed: Array<{ id: string; actionType: string; ok: boolean; reason?: string }>; };
+      return res as unknown as {
+        ok: boolean;
+        data?: { proposed: Array<{ id: string; actionType: string }>; executed: Array<{ id: string; actionType: string; ok: boolean; message?: string; code?: string }>; };
+        message?: string;
+        code?: string;
+      };
     },
     onSuccess: (res) => {
       if (!res.ok) {
-        toast.error("Orchestrate failed");
+        toast.error(res.message || res.code || "Orchestrate failed");
         return;
       }
-      const p = res.proposed?.length ?? 0;
-      const e = res.executed?.length ?? 0;
+      const p = res.data?.proposed?.length ?? 0;
+      const e = res.data?.executed?.length ?? 0;
       toast.success(`Orchestrate complete: ${p} proposed${orch.execute ? `, ${e} executed` : ""}`);
     },
     onError: (e: any) => {
@@ -64,20 +70,26 @@ function SettingsPage() {
 
   const pollMutation = useMutation({
     mutationFn: async () => {
+      // Add a short cooldown to prevent rapid clicks
+      (window as any).__lastSettingsPollClick = (window as any).__lastSettingsPollClick ?? 0;
+      const now = Date.now();
+      if (now - (window as any).__lastSettingsPollClick < 5000) {
+        return { ok: false, message: "Please wait a few seconds before polling again." } as any;
+      }
+      (window as any).__lastSettingsPollClick = now;
       const res = await poll({ data: { maxResults: 25 } });
-      return res as unknown as { ok: boolean; disabled?: boolean; fetched: number; proposed: number; labelQuery: string; reason?: string };
+      return res as unknown as {
+        ok: boolean;
+        data?: { disabled: boolean; fetched: number; proposed: number; labelQuery: string };
+        message?: string;
+        code?: string;
+      };
     },
     onSuccess: (res) => {
-      if (!res.ok) {
-        toast.error(res.reason || "Poll failed");
-        return;
-      }
-      if (res.disabled) {
-        toast.message("Polling disabled", { description: "Enable auto-pull to run in background." });
-        return;
-      }
-      toast.success(`Poll complete: ${res.fetched} new emails, ${res.proposed} proposals`, {
-        description: `Query: ${res.labelQuery}`,
+      if (!res.ok) return toast.error(res.message || res.code || "Poll failed");
+      if (res.data?.disabled) return toast.message("Polling disabled", { description: "Enable auto-pull to run in background." });
+      toast.success(`Poll complete: ${res.data?.fetched ?? 0} new emails, ${res.data?.proposed ?? 0} proposals`, {
+        description: `Query: ${res.data?.labelQuery ?? ""}`,
       });
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -138,16 +150,32 @@ function SettingsPage() {
     mutation.mutate(form);
   };
 
-  if (isLoading) return <div className="p-6">Loading settings…</div>;
+  if (isLoading)
+    return (
+      <div className="max-w-2xl p-6 space-y-6" aria-busy="true" aria-live="polite">
+        <h1 className="text-2xl font-semibold">Settings</h1>
+        <div className="animate-pulse space-y-4">
+          <div className="h-6 w-40 bg-gray-200 rounded" />
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="space-y-2">
+              <div className="h-4 w-56 bg-gray-200 rounded" />
+              <div className="h-9 w-full bg-gray-100 rounded" />
+            </div>
+          ))}
+          <div className="h-10 w-64 bg-gray-200 rounded" />
+        </div>
+        <div className="sr-only">Loading settings…</div>
+      </div>
+    );
   if (isError) return <div className="p-6 text-red-600">Failed to load settings</div>;
 
   return (
     <div className="max-w-2xl p-6 space-y-6">
       <h1 className="text-2xl font-semibold">Settings</h1>
       <div className="flex justify-end">
-        <Link to="/proposals" className="px-3 py-1.5 bg-gray-900 text-white rounded">
-          Open Proposals
-        </Link>
+        <Button asChild>
+          <Link to="/proposals">Open Proposals</Link>
+        </Button>
       </div>
       <form className="space-y-5" onSubmit={onSubmit}>
         <Field label="Shopify Shop Domain" hint="e.g. r901.myshopify.com">
@@ -198,12 +226,9 @@ function SettingsPage() {
           ) : (
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm text-gray-600">Not connected</div>
-              <a
-                href="/api/gmail/auth"
-                className="px-3 py-1.5 bg-blue-600 text-white rounded"
-              >
-                Connect Gmail
-              </a>
+              <Button asChild>
+                <a href="/api/gmail/auth">Connect Gmail</a>
+              </Button>
             </div>
           )}
         </div>
@@ -274,21 +299,15 @@ function SettingsPage() {
         </Field>
 
         <div className="flex gap-3">
-          <button
-            type="submit"
-            className="px-4 py-2 bg-black text-white rounded disabled:opacity-50"
-            disabled={mutation.isPending}
-          >
+          <Button type="submit" disabled={mutation.isPending} aria-busy={mutation.isPending}>
             {mutation.isPending ? "Saving…" : "Save"}
-          </button>
-          <button
-            type="button"
-            className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
-            onClick={() => pollMutation.mutate()}
-            disabled={pollMutation.isPending}
-          >
+          </Button>
+          <Button type="button" onClick={() => pollMutation.mutate()} disabled={pollMutation.isPending} aria-busy={pollMutation.isPending}>
             {pollMutation.isPending ? "Polling…" : "Run Poll Now"}
-          </button>
+          </Button>
+          {!data?.hasGmailToken ? (
+            <span className="text-xs text-gray-600 self-center">Connect Gmail first to enable full polling.</span>
+          ) : null}
         </div>
 
         {import.meta.env.DEV && (
@@ -322,14 +341,14 @@ function SettingsPage() {
               <label htmlFor="orch-execute" className="text-sm">Execute actions immediately (requires Shopify auth)</label>
             </div>
             <div>
-              <button
+              <Button
                 type="button"
-                className="px-4 py-2 bg-emerald-600 text-white rounded disabled:opacity-50"
                 onClick={() => orchestrateMutation.mutate()}
                 disabled={orchestrateMutation.isPending || !orch.content.trim()}
+                aria-busy={orchestrateMutation.isPending}
               >
                 {orchestrateMutation.isPending ? (orch.execute ? "Executing…" : "Proposing…") : (orch.execute ? "Propose + Execute" : "Propose Only")}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -339,11 +358,22 @@ function SettingsPage() {
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  const hintId = React.useId();
+  let childWithA11y: React.ReactNode = children;
+  if (React.isValidElement(children)) {
+    const prevDescribedBy = (children.props as any)["aria-describedby"] as string | undefined;
+    const describedBy = [prevDescribedBy, hint ? hintId : undefined].filter(Boolean).join(" ") || undefined;
+    childWithA11y = (React as any).cloneElement(children as any, { "aria-describedby": describedBy } as any);
+  }
   return (
     <label className="block space-y-1">
       <div className="text-sm font-medium">{label}</div>
-      {children}
-      {hint ? <div className="text-xs text-gray-500">{hint}</div> : null}
+      {childWithA11y}
+      {hint ? (
+        <div className="text-xs text-gray-500" id={hintId}>
+          {hint}
+        </div>
+      ) : null}
     </label>
   );
 }

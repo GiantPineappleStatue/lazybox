@@ -1,4 +1,5 @@
 import { proposeFromEmail, runShopifyAction, type LlmOptions, type ProposedAction } from "./agent.js";
+import { randomUUID } from "node:crypto";
 import type { ShopifyAuth } from "./shopify/helpers.js";
 import type { Reporter, ExecutionRecord } from "./reporter.js";
 import { defaultReporter } from "./reporter.js";
@@ -19,13 +20,14 @@ export type OrchestrateEmailResult = {
     actionType: ProposedAction["actionType"];
     ok: boolean;
     message?: string;
-    reason?: string;
+    code?: string;
     data?: Record<string, unknown>;
   }>;
 };
 
 export async function orchestrateEmail(params: OrchestrateEmailParams): Promise<OrchestrateEmailResult> {
   const reporter = params.reporter ?? defaultReporter;
+  const correlationId = randomUUID();
   const proposed = await proposeFromEmail(params.content, params.llm ? { llm: params.llm } : undefined);
   try {
     await reporter.onProposed?.(proposed);
@@ -42,14 +44,18 @@ export async function orchestrateEmail(params: OrchestrateEmailParams): Promise<
   for (const action of proposed) {
     // Currently all AllowedAction values are Shopify actions
     if (!params.shopifyAuth) {
-      executed.push({ id: action.id, actionType: action.actionType, ok: false, reason: "Missing Shopify auth" });
+      executed.push({ id: action.id, actionType: action.actionType, ok: false, code: "MissingShopifyAuth", message: "Missing Shopify auth" });
       continue;
     }
     try {
-      const res = await runShopifyAction({ actionType: action.actionType, payload: action.payload, auth: params.shopifyAuth });
-      executed.push({ id: action.id, actionType: action.actionType, ok: res.ok, message: (res as any).message, data: (res as any).data });
+      const res = await runShopifyAction({ actionType: action.actionType, payload: action.payload, auth: params.shopifyAuth, correlationId });
+      if (res.ok) {
+        executed.push({ id: action.id, actionType: action.actionType, ok: true, message: res.message, data: (res as any).data });
+      } else {
+        executed.push({ id: action.id, actionType: action.actionType, ok: false, code: (res as any).code, message: res.message, data: (res as any).data });
+      }
     } catch (e) {
-      executed.push({ id: action.id, actionType: action.actionType, ok: false, reason: (e as Error)?.message || "Execution failed" });
+      executed.push({ id: action.id, actionType: action.actionType, ok: false, code: "ExecutionFailed", message: (e as Error)?.message || "Execution failed" });
     }
   }
   try {

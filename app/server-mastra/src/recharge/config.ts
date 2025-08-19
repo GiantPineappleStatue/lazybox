@@ -21,7 +21,7 @@ export function getRechargeConfig(ctx: RechargeAuthContext) {
   const apiKey = (ctx?.auth?.apiKey as string | undefined) || process.env.RECHARGE_API_KEY;
   const base = (ctx?.auth?.base as string | undefined) || process.env.RECHARGE_API_BASE || "https://api.rechargeapps.com";
   if (!apiKey) {
-    return { ok: false as const, reason: "Missing RECHARGE_API_KEY", message: "Recharge API key not provided" };
+    return { ok: false as const, code: "MissingRechargeApiKey", message: "Recharge API key not provided" };
   }
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -68,3 +68,4 @@ export function allowedUpdateFieldsFor(auth?: RechargeAuth): ReadonlySet<(typeof
   }
   return VERSIONED_UPDATE_ALLOWED_FIELDS.default;
 }
+

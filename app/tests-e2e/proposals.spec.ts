@@ -96,8 +96,9 @@ test.describe('Proposals E2E', () => {
     await checkboxes.nth(0).check();
     await checkboxes.nth(1).check();
 
-    page.once('dialog', (d) => d.accept());
     await page.getByTestId('bulk-approve').click();
+    // Confirm modal
+    await page.getByTestId('confirm-bulk').click();
 
     // After approve, status badge should read approved or no error toast should show
     // We will allow some time for mutation
@@ -106,8 +107,8 @@ test.describe('Proposals E2E', () => {
     // Try reject as well
     await checkboxes.nth(0).check();
     await checkboxes.nth(1).check();
-    page.once('dialog', (d) => d.accept());
     await page.getByTestId('bulk-reject').click();
+    await page.getByTestId('confirm-bulk').click();
     await page.waitForTimeout(500);
 
     // At least ensure no crash and buttons are still present

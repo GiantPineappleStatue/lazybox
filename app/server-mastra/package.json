@@ -6,7 +6,8 @@
   "description": "Server-only Mastra agent subpackage (isolated deps: zod v3)",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@mastra/core": "latest",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.5.0",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
   }
 }

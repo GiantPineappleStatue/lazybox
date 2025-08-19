@@ -57,9 +57,9 @@ export const ServerRoute = createServerFileRoute("/api/dev/seed").methods({
       }));
       await db.insert(proposalTable).values(props as any).onConflictDoNothing();
 
-      return Response.json({ ok: true, createdEmails: emails.length, createdProposals: props.length });
+      return Response.json({ ok: true, data: { createdEmails: emails.length, createdProposals: props.length } });
     } catch (e: any) {
-      return Response.json({ ok: false, reason: e?.message || "seed failed" }, { status: 500 });
+      return Response.json({ ok: false, code: "DEV_SEED_FAILED", message: e?.message || "seed failed" }, { status: 500 });
     }
   },
 });

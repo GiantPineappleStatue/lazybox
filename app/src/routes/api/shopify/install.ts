@@ -15,7 +15,7 @@ export const ServerRoute = createServerFileRoute(
 
     const state = randomBytes(16).toString("hex");
     const scopes = env.SHOPIFY_SCOPES ?? "";
-    const redirectUri = env.SHOPIFY_REDIRECT;
+    const redirectUri = env.SHOPIFY_REDIRECT_URI;
 
     const authUrl = new URL(`https://${shop}/admin/oauth/authorize`);
     authUrl.searchParams.set("client_id", env.SHOPIFY_API_KEY);

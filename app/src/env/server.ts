@@ -25,7 +25,7 @@ export const env = createEnv({
     SHOPIFY_API_KEY: z.string().optional(),
     SHOPIFY_API_SECRET: z.string().optional(),
     SHOPIFY_SCOPES: z.string().optional(),
-    SHOPIFY_REDIRECT: z
+    SHOPIFY_REDIRECT_URI: z
       .string()
       .url()
       .default("http://localhost:3000/api/shopify/callback"),

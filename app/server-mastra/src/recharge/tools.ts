@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { createTool } from "@mastra/core/tools";
-import { safeJson } from "../utils/http.js";
+import { safeJson, fetchWithRetry } from "../utils/http.js";
+import { randomUUID } from "node:crypto";
+import { logToolEnd, logToolStart } from "../observability/logger.js";
 import {
   getRechargeConfig,
   resolveRechargeVersion,
@@ -22,15 +24,22 @@ export const rechargeGetCustomerByEmail = createTool({
   }),
   outputSchema: z.object({ customers: z.array(z.unknown()).default([]) }),
   execute: async ({ context }: { context: any }) => {
+    const corrId = randomUUID();
+    logToolStart("rechargeGetCustomerByEmail", corrId, redactAuth(context));
     const cfg = getRechargeConfig(context);
-    if (!cfg.ok) return { customers: [] };
+    if (!cfg.ok) {
+      logToolEnd("rechargeGetCustomerByEmail", corrId, false, { code: "MissingRechargeApiKey", message: "Recharge API key not configured" });
+      return { customers: [] };
+    }
     const { base, headers } = cfg;
     const url = `${base}/customers?email=${encodeURIComponent(context.email)}&limit=${context.limit}`;
-    const res = await fetch(url, { headers });
+    const res = await fetchWithRetry(url, { headers: { ...headers }, correlationId: corrId });
     if (!res.ok) return { customers: [] };
     const data = await safeJson(res);
     const customers = (data as any)?.customers;
-    return { customers: Array.isArray(customers) ? customers : [] };
+    const out = { customers: Array.isArray(customers) ? customers : [] };
+    logToolEnd("rechargeGetCustomerByEmail", corrId, true, out);
+    return out;
   },
 });
 
@@ -50,13 +59,18 @@ export const rechargeListSubscriptions = createTool({
     .refine((v) => Boolean(v.customerId || v.email), { message: "Provide customerId or email" }),
   outputSchema: z.object({ subscriptions: z.array(z.unknown()).default([]) }),
   execute: async ({ context }: { context: any }) => {
+    const corrId = randomUUID();
+    logToolStart("rechargeListSubscriptions", corrId, redactAuth(context));
     const cfg = getRechargeConfig(context);
-    if (!cfg.ok) return { subscriptions: [] };
+    if (!cfg.ok) {
+      logToolEnd("rechargeListSubscriptions", corrId, false, { code: "MissingRechargeApiKey", message: "Recharge API key not configured" });
+      return { subscriptions: [] };
+    }
     const { base, headers } = cfg;
 
     let customerId = context.customerId;
     if (!customerId && context.email) {
-      const cres = await fetch(`${base}/customers?email=${encodeURIComponent(context.email)}&limit=1`, { headers });
+      const cres = await fetchWithRetry(`${base}/customers?email=${encodeURIComponent(context.email)}&limit=1`, { headers: { ...headers }, correlationId: corrId });
       if (!cres.ok) return { subscriptions: [] };
       const cdata = await safeJson(cres);
       customerId = (Array.isArray((cdata as any)?.customers) && (cdata as any).customers[0]?.id) || undefined;
@@ -64,11 +78,13 @@ export const rechargeListSubscriptions = createTool({
     }
 
     const url = `${base}/subscriptions?customer_id=${customerId}&status=${encodeURIComponent(context.status)}&limit=${context.limit}`;
-    const res = await fetch(url, { headers });
+    const res = await fetchWithRetry(url, { headers: { ...headers }, correlationId: corrId });
     if (!res.ok) return { subscriptions: [] };
     const data = await safeJson(res);
     const subs = (data as any)?.subscriptions;
-    return { subscriptions: Array.isArray(subs) ? subs : [] };
+    const out = { subscriptions: Array.isArray(subs) ? subs : [] };
+    logToolEnd("rechargeListSubscriptions", corrId, true, out);
+    return out;
   },
 });
 
@@ -86,8 +102,14 @@ export const rechargeCancelSubscription = createTool({
   }),
   outputSchema: z.object({ ok: z.boolean(), message: z.string().optional(), data: z.unknown().optional() }),
   execute: async ({ context }: { context: any }) => {
+    const corrId = randomUUID();
+    logToolStart("rechargeCancelSubscription", corrId, redactAuth(context));
     const cfg = getRechargeConfig(context);
-    if (!cfg.ok) return { ok: false, message: "Recharge API key not configured" };
+    if (!cfg.ok) {
+      const out = { ok: false, message: "Recharge API key not configured" } as const;
+      logToolEnd("rechargeCancelSubscription", corrId, false, out);
+      return out;
+    }
     const { base, headers } = cfg;
 
     const body: Record<string, unknown> = {
@@ -100,13 +122,20 @@ export const rechargeCancelSubscription = createTool({
       body["send_email"] = context.sendEmail;
     }
 
-    const res = await fetch(`${base}/subscriptions/${context.subscriptionId}/cancel`, {
+    const res = await fetchWithRetry(`${base}/subscriptions/${context.subscriptionId}/cancel`, {
       method: "POST",
-      headers,
+      headers: { ...headers },
       body: JSON.stringify(body),
+      correlationId: corrId,
     });
-    if (!res.ok) return { ok: false, message: "Cancel failed", data: await safeJson(res) };
-    return { ok: true, message: "Subscription cancelled", data: await safeJson(res) };
+    if (!res.ok) {
+      const out = { ok: false, message: "Cancel failed", data: await safeJson(res) } as const;
+      logToolEnd("rechargeCancelSubscription", corrId, false, out);
+      return out as unknown as { ok: boolean; message?: string; data?: unknown };
+    }
+    const out = { ok: true, message: "Subscription cancelled", data: await safeJson(res) };
+    logToolEnd("rechargeCancelSubscription", corrId, true, out);
+    return out;
   },
 });
 
@@ -192,8 +221,14 @@ export const rechargeUpdateSubscription = createTool({
     }),
   outputSchema: z.object({ ok: z.boolean(), message: z.string().optional(), subscription: z.unknown().optional(), data: z.unknown().optional() }),
   execute: async ({ context }: { context: any }) => {
+    const corrId = randomUUID();
+    logToolStart("rechargeUpdateSubscription", corrId, redactAuth(context));
     const cfg = getRechargeConfig(context);
-    if (!cfg.ok) return { ok: false, message: "Recharge API key not configured" };
+    if (!cfg.ok) {
+      const out = { ok: false, message: "Recharge API key not configured" } as const;
+      logToolEnd("rechargeUpdateSubscription", corrId, false, out);
+      return out as unknown as { ok: boolean; message?: string };
+    }
     const { base, headers } = cfg;
 
     const resolvedVersion = resolveRechargeVersion(context?.auth);
@@ -226,15 +261,22 @@ export const rechargeUpdateSubscription = createTool({
     if (Object.keys(body).length === 0) {
       return { ok: false, message: "No fields provided to update" };
     }
-    const res = await fetch(`${base}/subscriptions/${context.subscriptionId}${qs ? `?${qs}` : ""}`, {
+    const res = await fetchWithRetry(`${base}/subscriptions/${context.subscriptionId}${qs ? `?${qs}` : ""}`, {
       method: "PUT",
-      headers,
+      headers: { ...headers },
       body: JSON.stringify(body),
+      correlationId: corrId,
     });
-    if (!res.ok) return { ok: false, message: "Update failed", data: await safeJson(res) };
+    if (!res.ok) {
+      const out = { ok: false, message: "Update failed", data: await safeJson(res) } as const;
+      logToolEnd("rechargeUpdateSubscription", corrId, false, out);
+      return out as unknown as { ok: boolean; message?: string; data?: unknown };
+    }
     const data = await safeJson(res);
     const msg = `Subscription updated${knownProfile ? "" : ` (unknown version '${resolvedVersion}', used default profile)`}`;
-    return { ok: true, message: msg, subscription: (data as any)?.subscription, data };
+    const out = { ok: true, message: msg, subscription: (data as any)?.subscription, data };
+    logToolEnd("rechargeUpdateSubscription", corrId, true, out);
+    return out;
   },
 });
 
@@ -250,17 +292,41 @@ export const rechargeSetNextChargeDate = createTool({
   }),
   outputSchema: z.object({ ok: z.boolean(), message: z.string().optional(), subscription: z.unknown().optional(), data: z.unknown().optional() }),
   execute: async ({ context }: { context: any }) => {
+    const corrId = randomUUID();
+    logToolStart("rechargeSetNextChargeDate", corrId, redactAuth(context));
     const cfg = getRechargeConfig(context);
-    if (!cfg.ok) return { ok: false, message: "Recharge API key not configured" };
+    if (!cfg.ok) {
+      const out = { ok: false, message: "Recharge API key not configured" } as const;
+      logToolEnd("rechargeSetNextChargeDate", corrId, false, out);
+      return out as unknown as { ok: boolean; message?: string };
+    }
     const { base, headers } = cfg;
 
-    const res = await fetch(`${base}/subscriptions/${context.subscriptionId}/set_next_charge_date`, {
+    const res = await fetchWithRetry(`${base}/subscriptions/${context.subscriptionId}/set_next_charge_date`, {
       method: "POST",
-      headers,
+      headers: { ...headers },
       body: JSON.stringify({ date: context.date }),
+      correlationId: corrId,
     });
-    if (!res.ok) return { ok: false, message: "Set next charge date failed", data: await safeJson(res) };
+    if (!res.ok) {
+      const out = { ok: false, message: "Set next charge date failed", data: await safeJson(res) } as const;
+      logToolEnd("rechargeSetNextChargeDate", corrId, false, out);
+      return out as unknown as { ok: boolean; message?: string; data?: unknown };
+    }
     const data = await safeJson(res);
-    return { ok: true, message: "Next charge date set", subscription: (data as any)?.subscription, data };
+    const out = { ok: true, message: "Next charge date set", subscription: (data as any)?.subscription, data };
+    logToolEnd("rechargeSetNextChargeDate", corrId, true, out);
+    return out;
   },
 });
+
+function redactAuth(input: unknown): unknown {
+  try {
+    if (!input || typeof input !== "object") return input;
+    const clone = JSON.parse(JSON.stringify(input));
+    if (clone?.auth?.apiKey) clone.auth.apiKey = "[REDACTED]";
+    return clone;
+  } catch {
+    return input;
+  }
+}
